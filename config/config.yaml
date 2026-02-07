@@ -1,0 +1,602 @@
+# MODE: "nifty", "forex", or "spx500"
+mode: nifty
+
+# ============================================================================
+# NIFTY SETTINGS
+# ============================================================================
+nifty:
+  market:
+    symbol: NIFTY
+    lot_size: 50
+    sl_buffer_points: 1
+  
+  data:
+    file_path: data/raw/nifty50_candlestick_data.csv
+    timeframe: 1min
+    datetime_column: Date
+    start_date: 2024-01-01
+    end_date: 2024-12-31
+  
+  capital:
+    initial_capital: 1000000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 40
+    slippage_points: 0.5
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    trading_start_time: "09:15"
+    trading_end_time: "15:15"
+    force_close_time: "15:15"
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 2.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low   # day_high for longs, day_low for shorts
+
+# ============================================================================
+# FOREX SETTINGS (EURUSD 1H)
+# ============================================================================
+forex:
+  market:
+    symbol: EURUSD
+    lot_size: 100000            # 1 standard lot
+    sl_buffer_points: 0.0001    # 1 pip buffer
+    pip_value: 10               # $10 per pip for 1 lot
+  
+  data:
+    file_path: data/raw/eurusd_1h.csv
+    timeframe: 1hour
+    datetime_column: Date
+    start_date: 2024-01-01
+    end_date: 2024-12-31
+    # Data format: tab-separated, no header
+    has_header: false
+    separator: tab
+  
+  capital:
+    initial_capital: 10000      # $10,000 USD
+    risk_per_trade: 0.01        # 1% risk per trade
+    max_drawdown_percent: 20
+    # max_loss_per_trade_pct: 1 # Disabled - using R:R based risk control
+  
+  execution:
+    brokerage_per_trade: 0      # Spread included in price
+    slippage_points: 0.0001     # 1 pip slippage
+    max_trades_per_day: 2       # Allow 1 trade per session
+  
+  backtest:
+    duration_limit_months: 12
+    # Mark from day start but trade in sessions
+    chart_start_time: "00:00"   # Mark structure from midnight
+    force_close_time: "21:00"   # Force close at end of NY session
+  
+  # Trading Sessions (UTC times)
+  sessions:
+    london:
+      name: "London"
+      start_time: "08:00"
+      end_time: "16:00"
+      enabled: true
+    new_york:
+      name: "New York"
+      start_time: "13:00"       # NY opens 13:00 UTC (8 AM EST)
+      end_time: "21:00"         # NY closes 21:00 UTC (4 PM EST)
+      enabled: true
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 2.0           # Minimum 1:2 R:R for forex
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false      # Disabled - using SMA for FOREX
+    use_sma_filter: true        # SMA 50 for FOREX bias
+    sma_period: 50              # 50-period SMA
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: pdh_pdl        # PDH for longs, PDL for shorts
+    swing_lookback: 3           # Reduced for 1H timeframe
+    structure_lookback_days: 5  # Build structure across 5 days
+
+# ============================================================================
+# SPX500 CFD SETTINGS (1-min intraday like NIFTY)
+# ============================================================================
+spx500:
+  market:
+    symbol: SPX500
+    contract_size: 10           # From MT4/MT5 specification
+    tick_size: 0.01             # Minimum price movement
+    tick_value: 0.01            # $0.01 per tick per contract
+    sl_buffer_points: 0.5       # SL buffer in points
+  
+  data:
+    file_path: data/raw/spx500_1min.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-10-24
+    end_date: 2026-02-06
+    # Data format: tab-separated with header
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000     # $100,000 USD
+    risk_per_trade: 0.01        # 1% risk per trade
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0      # CFD - spread included
+    slippage_points: 0.5        # 0.5 point slippage
+    max_trades_per_day: 1       # 1 trade per day
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # NY 09:30-15:45 local = 16:30-22:45 EET (winter) / 15:30-21:45 EET (summer)
+    # Using winter hours as baseline
+    trading_start_time: "16:30"   # EET time (NY 09:30)
+    trading_end_time: "22:45"     # EET time (NY 15:45)
+    force_close_time: "22:45"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true         # TRUE = Wait for OB 2.0 retest
+    min_rr_ratio: 3.0           # 1:3 R:R minimum required
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false      # VWAP filter DISABLED
+    use_sma_filter: false       # SMA disabled for indices
+    use_cvd_filter: false       # CVD filter DISABLED
+    use_liquidity_sweep_filter: false  # Pre-CHoCH liquidity sweep DISABLED
+    use_ob2_vwap_filter: false  # OB 2.0 VWAP bands filter DISABLED
+    ob2_vwap_tolerance: 3.0     # Tolerance points for OB2 VWAP check
+    use_candle_confirmation: false  # DISABLED - Enter when price touches OB2.0
+    use_bos_sweep_filter: true   # BOS liquidity sweep before entry
+                                # LONGS: Need bearish BOS sweep in bullish trend
+                                # SHORTS: Need bullish BOS sweep in bearish trend
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low   # Day High for longs, Day Low for shorts
+    swing_lookback: 5           # Standard for 1-min
+    sl_buffer_points: 2.0       # 2 point buffer for SL (above swing high/below swing low)
+
+# ============================================================================
+# FRA40 (CAC 40 - France) 1-min
+# ============================================================================
+fra40:
+  market:
+    symbol: FRA40
+    contract_size: 1
+    tick_size: 0.01
+    tick_value: 0.01
+    sl_buffer_points: 1.0
+  
+  data:
+    file_path: data/raw/FRA40_PERIOD_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 0.5
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # Paris 09:00-17:30 local = 10:00-18:30 EET
+    trading_start_time: "10:00"   # EET time (Paris 09:00)
+    trading_end_time: "18:30"     # EET time (Paris 17:30)
+    force_close_time: "18:30"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 1.0
+
+# ============================================================================
+# GER30 (DAX 30 - Germany) 1-min
+# ============================================================================
+ger30:
+  market:
+    symbol: GER30
+    contract_size: 1
+    tick_size: 0.01
+    tick_value: 0.01
+    sl_buffer_points: 4.0
+  
+  data:
+    file_path: data/raw/GER30_PERIOD_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 0.5
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # Frankfurt 09:00-17:30 local = 10:00-18:30 EET
+    trading_start_time: "10:00"   # EET time (Frankfurt 09:00)
+    trading_end_time: "18:30"     # EET time (Frankfurt 17:30)
+    force_close_time: "18:30"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 4.0
+
+# ============================================================================
+# HK50 (Hang Seng - Hong Kong) 1-min
+# ============================================================================
+hk50:
+  market:
+    symbol: HK50
+    contract_size: 1
+    tick_size: 1.0
+    tick_value: 1.0
+    sl_buffer_points: 10.0
+  
+  data:
+    file_path: data/raw/HK50_PERIOD_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 5.0
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # HK 09:30-16:00 local = 03:30-10:00 EET
+    trading_start_time: "03:30"   # EET time (HK 09:30)
+    trading_end_time: "10:00"     # EET time (HK 16:00)
+    force_close_time: "10:00"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 10.0
+
+# ============================================================================
+# JP225 (Nikkei 225 - Japan) 1-min
+# ============================================================================
+jp225:
+  market:
+    symbol: JP225
+    contract_size: 1
+    tick_size: 1.0
+    tick_value: 1.0
+    sl_buffer_points: 10.0
+  
+  data:
+    file_path: data/raw/JP225_PERIOD_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 5.0
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # Tokyo 09:00-15:00 local = 02:00-08:00 EET
+    trading_start_time: "02:00"   # EET time (Tokyo 09:00)
+    trading_end_time: "08:00"     # EET time (Tokyo 15:00)
+    force_close_time: "08:00"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 10.0
+
+# ============================================================================
+# NDX100 (NASDAQ 100 - US) 1-min
+# ============================================================================
+ndx100:
+  market:
+    symbol: NDX100
+    contract_size: 1
+    tick_size: 0.01
+    tick_value: 0.01
+    sl_buffer_points: 1.0
+  
+  data:
+    file_path: data/raw/NDX100_PERIOD_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 0.5
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # NY 09:30-15:45 local = 16:30-22:45 EET (winter)
+    trading_start_time: "16:30"   # EET time (NY 09:30)
+    trading_end_time: "22:45"     # EET time (NY 15:45)
+    force_close_time: "22:45"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 1.0
+
+# ============================================================================
+# UK100 (FTSE 100 - UK) 1-min
+# ============================================================================
+uk100:
+  market:
+    symbol: UK100
+    contract_size: 1
+    tick_size: 0.01
+    tick_value: 0.01
+    sl_buffer_points: 1.0
+  
+  data:
+    file_path: data/raw/UK100_PERIOD_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 0.5
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # London 08:00-16:30 local = 10:00-18:30 EET
+    trading_start_time: "10:00"   # EET time (London 08:00)
+    trading_end_time: "18:30"     # EET time (London 16:30)
+    force_close_time: "18:30"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 1.0
+
+# ============================================================================
+# US30 (Dow Jones 30 - US) 1-min
+# ============================================================================
+us30:
+  market:
+    symbol: US30
+    contract_size: 1
+    tick_size: 0.01
+    tick_value: 0.01
+    sl_buffer_points: 4.0
+  
+  data:
+    file_path: data/raw/US30_M1.csv
+    timeframe: 1min
+    datetime_column: Time
+    start_date: 2025-11-01
+    end_date: 2026-02-28
+    has_header: true
+    separator: tab
+  
+  capital:
+    initial_capital: 100000
+    risk_per_trade: 0.01
+    max_drawdown_percent: 20
+  
+  execution:
+    brokerage_per_trade: 0
+    slippage_points: 0.5
+    max_trades_per_day: 1
+  
+  backtest:
+    duration_limit_months: 12
+    # Trading hours in EET (MT4 broker time) - NO timezone conversion
+    # NY 09:30-15:45 local = 16:30-22:45 EET (winter)
+    trading_start_time: "16:30"   # EET time (NY 09:30)
+    trading_end_time: "22:45"     # EET time (NY 15:45)
+    force_close_time: "22:45"     # Force close
+    timezone: "EET"               # Keep data in broker timezone
+  
+  strategy:
+    bos_required_for_trend: 2
+    ob_invalidation_for_switch: true
+    use_ob2_entry: true
+    min_rr_ratio: 3.0
+    fib_level_min: 0.3
+    fib_level_max: 0.5
+    use_vwap_filter: false
+    use_sma_filter: false
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    ob2_vwap_tolerance: 3.0
+    use_candle_confirmation: false
+    use_bos_sweep_filter: true
+    use_atr_sl: false
+    atr_multiplier: 1.5
+    target_mode: day_high_low
+    swing_lookback: 5
+    sl_buffer_points: 4.0
+
+reporting:
+  save_trade_log: true
+  save_equity_curve: true
+  save_charts: true
+  output_dir: reports/screenshots

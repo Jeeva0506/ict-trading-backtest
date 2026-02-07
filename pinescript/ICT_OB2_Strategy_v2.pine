@@ -1,0 +1,623 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ICT OB 2.0 Strategy v2 - Fixed Structure Detection
+
+//@version=5
+indicator("ICT OB 2.0 Strategy v2", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+grp_structure = "📊 Market Structure"
+swingLookback = input.int(5, "Swing Lookback", minval=2, maxval=10, group=grp_structure)
+bosRequired = input.int(2, "BOS Required for Trend", minval=1, maxval=5, group=grp_structure)
+
+grp_fib = "📐 Fibonacci Pullback"
+fibLevelMin = input.float(0.3, "Min Pullback (30%)", minval=0.1, maxval=0.9, step=0.05, group=grp_fib)
+
+grp_entry = "🎯 Entry Settings"
+minRR = input.float(3.0, "Minimum R:R", minval=1.0, maxval=10.0, step=0.5, group=grp_entry)
+slBuffer = input.float(0.5, "SL Buffer (points)", minval=0.0, maxval=5.0, step=0.1, group=grp_entry)
+
+grp_visual = "🎨 Visuals"
+showSwings = input.bool(true, "Show Swing Points", group=grp_visual)
+showBOS = input.bool(true, "Show BOS Labels", group=grp_visual)
+showOB1 = input.bool(true, "Show OB 1 Zones", group=grp_visual)
+showOB2 = input.bool(true, "Show OB 2.0 Zones", group=grp_visual)
+showCHoCH = input.bool(true, "Show CHoCH Labels", group=grp_visual)
+showSignals = input.bool(true, "Show Entry Signals", group=grp_visual)
+showDebug = input.bool(false, "Show Debug Info", group=grp_visual)
+
+grp_session = "⏰ Session Filter"
+useSessionFilter = input.bool(false, "Filter by Session", group=grp_session)
+sessionStart = input.session("0930-1545", "NY Session", group=grp_session)
+
+grp_pdhl = "📈 PDH/PDL Targeting"
+usePDHPDL = input.bool(true, "Use PDH/PDL for TP3", group=grp_pdhl, tooltip="If current day H/L is hit before 1:3 RR, use previous day H/L as TP3")
+showPDHL = input.bool(true, "Show PDH/PDL Lines", group=grp_pdhl)
+
+// Colors
+bullColor = color.new(#26a69a, 0)
+bearColor = color.new(#ef5350, 0)
+ob1BullColor = color.new(#8B4513, 60)  // Brown for OB1 bullish setup
+ob1BearColor = color.new(#8B4513, 60)  // Brown for OB1 bearish setup
+ob2BullColor = color.new(#00CED1, 50)  // Teal for OB2 bullish (LONG entry)
+ob2BearColor = color.new(#FF6347, 50)  // Tomato for OB2 bearish (SHORT entry)
+
+// ============================================================================
+// DAILY HIGH/LOW TRACKING (Current Day and Previous Day)
+// ============================================================================
+// Get previous day's high and low using security request
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+// Track current day's high and low
+var float currentDayHigh = na
+var float currentDayLow = na
+isNewDay = ta.change(time("D")) != 0
+
+if isNewDay
+    currentDayHigh := high
+    currentDayLow := low
+else
+    currentDayHigh := math.max(nz(currentDayHigh, high), high)
+    currentDayLow := math.min(nz(currentDayLow, low), low)
+
+// Plot PDH/PDL lines
+var line pdhLine = na
+var line pdlLine = na
+var label pdhLabel = na
+var label pdlLabel = na
+
+if showPDHL and isNewDay
+    // Delete old lines
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    label.delete(pdhLabel)
+    label.delete(pdlLabel)
+    
+    // Draw new PDH/PDL lines
+    pdhLine := line.new(bar_index, pdh, bar_index + 100, pdh, color=color.new(color.orange, 50), width=1, style=line.style_dashed)
+    pdlLine := line.new(bar_index, pdl, bar_index + 100, pdl, color=color.new(color.purple, 50), width=1, style=line.style_dashed)
+    pdhLabel := label.new(bar_index, pdh, "PDH", color=color.new(color.orange, 80), textcolor=color.orange, size=size.tiny, style=label.style_label_left)
+    pdlLabel := label.new(bar_index, pdl, "PDL", color=color.new(color.purple, 80), textcolor=color.purple, size=size.tiny, style=label.style_label_left)
+
+// ============================================================================
+// SWING HIGH/LOW DETECTION
+// ============================================================================
+pivotHigh = ta.pivothigh(high, swingLookback, swingLookback)
+pivotLow = ta.pivotlow(low, swingLookback, swingLookback)
+
+// Plot swing points at the correct bar (offset by lookback)
+plotshape(showSwings and not na(pivotHigh), "Swing High", shape.triangledown, location.abovebar, bearColor, size=size.tiny, offset=-swingLookback)
+plotshape(showSwings and not na(pivotLow), "Swing Low", shape.triangleup, location.belowbar, bullColor, size=size.tiny, offset=-swingLookback)
+
+// ============================================================================
+// TRACK ALL SWING LEVELS WITH HISTORY
+// ============================================================================
+var float[] swingHighs = array.new_float(0)
+var int[] swingHighBars = array.new_int(0)
+var float[] swingLows = array.new_float(0)
+var int[] swingLowBars = array.new_int(0)
+
+// Store new swing highs
+if not na(pivotHigh)
+    array.push(swingHighs, high[swingLookback])
+    array.push(swingHighBars, bar_index - swingLookback)
+    // Keep only last 20 swings
+    if array.size(swingHighs) > 20
+        array.shift(swingHighs)
+        array.shift(swingHighBars)
+
+// Store new swing lows
+if not na(pivotLow)
+    array.push(swingLows, low[swingLookback])
+    array.push(swingLowBars, bar_index - swingLookback)
+    // Keep only last 20 swings
+    if array.size(swingLows) > 20
+        array.shift(swingLows)
+        array.shift(swingLowBars)
+
+// Get most recent swing levels
+float lastSwingHigh = array.size(swingHighs) > 0 ? array.get(swingHighs, array.size(swingHighs) - 1) : na
+int lastSwingHighBar = array.size(swingHighBars) > 0 ? array.get(swingHighBars, array.size(swingHighBars) - 1) : na
+float lastSwingLow = array.size(swingLows) > 0 ? array.get(swingLows, array.size(swingLows) - 1) : na
+int lastSwingLowBar = array.size(swingLowBars) > 0 ? array.get(swingLowBars, array.size(swingLowBars) - 1) : na
+
+// ============================================================================
+// BOS DETECTION - Track direction and count
+// ============================================================================
+var string currentTrend = "none"  // "bullish", "bearish", "none"
+var int bullishBOSCount = 0
+var int bearishBOSCount = 0
+var float lastBullishBOSLevel = na
+var float lastBearishBOSLevel = na
+var int lastBullishBOSBar = na
+var int lastBearishBOSBar = na
+
+// Store the swing level that was broken for CHoCH reference
+var float swingHighAtBearishBOS = na  // When bearish BOS happens, store the swing high for bullish CHoCH
+var float swingLowAtBullishBOS = na   // When bullish BOS happens, store the swing low for bearish CHoCH
+
+// Detect Bullish BOS: Close above last swing high
+bool bullishBOS = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+
+// Detect Bearish BOS: Close below last swing low  
+bool bearishBOS = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+
+if bullishBOS
+    if currentTrend == "bullish"
+        bullishBOSCount += 1
+    else
+        // Trend changed to bullish
+        currentTrend := "bullish"
+        bullishBOSCount := 1
+        bearishBOSCount := 0
+    
+    lastBullishBOSLevel := lastSwingHigh
+    lastBullishBOSBar := bar_index
+    swingLowAtBullishBOS := lastSwingLow  // Store for bearish CHoCH later
+    
+    if showBOS
+        label.new(bar_index, high, "BOS▲ #" + str.tostring(bullishBOSCount), 
+                  color=bullColor, textcolor=color.white, size=size.tiny, style=label.style_label_down)
+
+if bearishBOS
+    if currentTrend == "bearish"
+        bearishBOSCount += 1
+    else
+        // Trend changed to bearish
+        currentTrend := "bearish"
+        bearishBOSCount := 1
+        bullishBOSCount := 0
+    
+    lastBearishBOSLevel := lastSwingLow
+    lastBearishBOSBar := bar_index
+    swingHighAtBearishBOS := lastSwingHigh  // Store for bullish CHoCH later
+    
+    if showBOS
+        label.new(bar_index, low, "BOS▼ #" + str.tostring(bearishBOSCount), 
+                  color=bearColor, textcolor=color.white, size=size.tiny, style=label.style_label_up)
+
+// ============================================================================
+// TREND CONFIRMATION - Need bosRequired BOS in same direction
+// ============================================================================
+bool bullishTrendConfirmed = currentTrend == "bullish" and bullishBOSCount >= bosRequired
+bool bearishTrendConfirmed = currentTrend == "bearish" and bearishBOSCount >= bosRequired
+
+// ============================================================================
+// STATE MACHINE FOR TRADE SETUP
+// ============================================================================
+var string setupState = "waiting_bos"  // States: waiting_bos, waiting_pullback, waiting_ob1, waiting_choch, waiting_ob2_entry
+var string setupDirection = "none"     // "long" or "short"
+var float setupSwingHigh = na
+var float setupSwingLow = na
+var float setupBOSLevel = na
+var int setupBOSBar = na
+
+// OB1 tracking
+var float ob1High = na
+var float ob1Low = na
+var int ob1Bar = na
+var box ob1Box = na
+
+// OB2 tracking
+var float ob2High = na
+var float ob2Low = na
+var int ob2Bar = na
+var box ob2Box = na
+
+// CHoCH tracking
+var float chochLevel = na
+var int chochBar = na
+
+// Reset at new day (isNewDay already declared in PDH/PDL section)
+if isNewDay
+    setupState := "waiting_bos"
+    setupDirection := "none"
+    ob1High := na
+    ob1Low := na
+    ob2High := na
+    ob2Low := na
+    chochLevel := na
+
+// ============================================================================
+// STATE: WAITING FOR CONFIRMED BOS
+// ============================================================================
+if setupState == "waiting_bos"
+    // Start LONG setup after confirmed bullish trend
+    if bullishTrendConfirmed and bullishBOS
+        setupState := "waiting_pullback"
+        setupDirection := "long"
+        setupSwingHigh := lastSwingHigh
+        setupSwingLow := lastSwingLow
+        setupBOSLevel := lastSwingHigh
+        setupBOSBar := bar_index
+        if showDebug
+            label.new(bar_index, high * 1.001, "SETUP: LONG", color=color.blue, textcolor=color.white, size=size.tiny)
+    
+    // Start SHORT setup after confirmed bearish trend
+    if bearishTrendConfirmed and bearishBOS
+        setupState := "waiting_pullback"
+        setupDirection := "short"
+        setupSwingHigh := lastSwingHigh
+        setupSwingLow := lastSwingLow
+        setupBOSLevel := lastSwingLow
+        setupBOSBar := bar_index
+        if showDebug
+            label.new(bar_index, low * 0.999, "SETUP: SHORT", color=color.orange, textcolor=color.white, size=size.tiny)
+
+// ============================================================================
+// STATE: WAITING FOR PULLBACK (Min 30% Fib)
+// ============================================================================
+if setupState == "waiting_pullback"
+    if setupDirection == "long"
+        // For LONG: Pullback = price drops from BOS high toward swing low
+        float fibRange = setupBOSLevel - setupSwingLow
+        float fib30 = setupBOSLevel - (fibLevelMin * fibRange)
+        
+        // Pullback valid when low reaches at least 30% retracement
+        if low <= fib30 and close > setupSwingLow
+            setupState := "waiting_ob1"
+            if showDebug
+                label.new(bar_index, low, "PULLBACK OK", color=color.green, textcolor=color.white, size=size.tiny)
+        
+        // Invalidation: Close below swing low
+        if close < setupSwingLow
+            setupState := "waiting_bos"
+            setupDirection := "none"
+    
+    if setupDirection == "short"
+        // For SHORT: Pullback = price rises from BOS low toward swing high
+        float fibRange = setupSwingHigh - setupBOSLevel
+        float fib30 = setupBOSLevel + (fibLevelMin * fibRange)
+        
+        // Pullback valid when high reaches at least 30% retracement
+        if high >= fib30 and close < setupSwingHigh
+            setupState := "waiting_ob1"
+            if showDebug
+                label.new(bar_index, high, "PULLBACK OK", color=color.green, textcolor=color.white, size=size.tiny)
+        
+        // Invalidation: Close above swing high
+        if close > setupSwingHigh
+            setupState := "waiting_bos"
+            setupDirection := "none"
+
+// ============================================================================
+// STATE: FIND OB1 (Last 2 opposite candles, or 3 if continuous)
+// ============================================================================
+if setupState == "waiting_ob1"
+    if setupDirection == "long"
+        // For LONG setup: Find last 2-3 BEARISH candles before the BOS
+        float tempHigh = na
+        float tempLow = na
+        int tempBar = na
+        int candleCount = 0
+        int consecutiveCount = 0
+        
+        for i = 1 to 20
+            int checkBar = bar_index - i
+            if checkBar >= setupBOSBar - 15 and checkBar < setupBOSBar
+                bool isBearish = close[i] < open[i]
+                
+                if isBearish
+                    consecutiveCount += 1
+                    candleCount += 1
+                    
+                    // Track highest high and lowest low
+                    if na(tempHigh) or high[i] > tempHigh
+                        tempHigh := high[i]
+                    if na(tempLow) or low[i] < tempLow
+                        tempLow := low[i]
+                    if na(tempBar)
+                        tempBar := bar_index - i
+                    
+                    // Take 2 candles minimum, or 3 if they're continuous
+                    if candleCount >= 2
+                        // Check if next candle is also bearish (continuous)
+                        bool nextBearish = i + 1 <= 20 and close[i + 1] < open[i + 1]
+                        if consecutiveCount >= 2 and nextBearish and candleCount < 3
+                            continue  // Take one more
+                        else
+                            break
+                else
+                    // Reset consecutive count on bullish candle
+                    if candleCount >= 2
+                        break
+                    consecutiveCount := 0
+        
+        if not na(tempHigh) and not na(tempLow) and candleCount >= 2
+            ob1High := tempHigh
+            ob1Low := tempLow
+            ob1Bar := tempBar
+            setupState := "waiting_choch"
+            
+            if showOB1
+                ob1Box := box.new(ob1Bar, ob1High, bar_index + 30, ob1Low, 
+                                 border_color=color.new(#8B4513, 0), bgcolor=ob1BullColor, border_width=1)
+                label.new(ob1Bar, ob1Low, "OB1 (" + str.tostring(candleCount) + ")", color=color.new(#8B4513, 0), textcolor=color.white, 
+                         size=size.tiny, style=label.style_label_up)
+    
+    if setupDirection == "short"
+        // For SHORT setup: Find last 2-3 BULLISH candles before the BOS
+        float tempHigh = na
+        float tempLow = na
+        int tempBar = na
+        int candleCount = 0
+        int consecutiveCount = 0
+        
+        for i = 1 to 20
+            int checkBar = bar_index - i
+            if checkBar >= setupBOSBar - 15 and checkBar < setupBOSBar
+                bool isBullish = close[i] > open[i]
+                
+                if isBullish
+                    consecutiveCount += 1
+                    candleCount += 1
+                    
+                    // Track highest high and lowest low
+                    if na(tempHigh) or high[i] > tempHigh
+                        tempHigh := high[i]
+                    if na(tempLow) or low[i] < tempLow
+                        tempLow := low[i]
+                    if na(tempBar)
+                        tempBar := bar_index - i
+                    
+                    // Take 2 candles minimum, or 3 if they're continuous
+                    if candleCount >= 2
+                        // Check if next candle is also bullish (continuous)
+                        bool nextBullish = i + 1 <= 20 and close[i + 1] > open[i + 1]
+                        if consecutiveCount >= 2 and nextBullish and candleCount < 3
+                            continue  // Take one more
+                        else
+                            break
+                else
+                    // Reset consecutive count on bearish candle
+                    if candleCount >= 2
+                        break
+                    consecutiveCount := 0
+        
+        if not na(tempHigh) and not na(tempLow) and candleCount >= 2
+            ob1High := tempHigh
+            ob1Low := tempLow
+            ob1Bar := tempBar
+            setupState := "waiting_choch"
+            
+            if showOB1
+                ob1Box := box.new(ob1Bar, ob1High, bar_index + 30, ob1Low, 
+                                 border_color=color.new(#8B4513, 0), bgcolor=ob1BearColor, border_width=1)
+                label.new(ob1Bar, ob1High, "OB1 (" + str.tostring(candleCount) + ")", color=color.new(#8B4513, 0), textcolor=color.white, 
+                         size=size.tiny, style=label.style_label_down)
+
+// ============================================================================
+// STATE: WAITING FOR CHoCH (Change of Character)
+// ============================================================================
+if setupState == "waiting_choch"
+    if setupDirection == "long"
+        // CHoCH for LONG: Close ABOVE the swing high from the LAST BEARISH BOS
+        // This is the key level - when bearish structure was created, what was the swing high?
+        float chochTarget = swingHighAtBearishBOS
+        
+        if not na(chochTarget) and close > chochTarget and close[1] <= chochTarget
+            chochLevel := chochTarget
+            chochBar := bar_index
+            setupState := "waiting_ob2"
+            
+            if showCHoCH
+                label.new(bar_index, high, "CHoCH ▲", color=bullColor, textcolor=color.white, 
+                         size=size.small, style=label.style_label_down)
+                line.new(chochBar - 20, chochLevel, chochBar, chochLevel, 
+                        color=bullColor, width=2, style=line.style_dotted)
+    
+    if setupDirection == "short"
+        // CHoCH for SHORT: Close BELOW the swing low from the LAST BULLISH BOS
+        float chochTarget = swingLowAtBullishBOS
+        
+        if not na(chochTarget) and close < chochTarget and close[1] >= chochTarget
+            chochLevel := chochTarget
+            chochBar := bar_index
+            setupState := "waiting_ob2"
+            
+            if showCHoCH
+                label.new(bar_index, low, "CHoCH ▼", color=bearColor, textcolor=color.white, 
+                         size=size.small, style=label.style_label_up)
+                line.new(chochBar - 20, chochLevel, chochBar, chochLevel, 
+                        color=bearColor, width=2, style=line.style_dotted)
+    
+    // OB1 Invalidation check
+    if setupDirection == "long" and not na(ob1Low) and close < ob1Low
+        setupState := "waiting_bos"
+        setupDirection := "none"
+    
+    if setupDirection == "short" and not na(ob1High) and close > ob1High
+        setupState := "waiting_bos"
+        setupDirection := "none"
+
+// ============================================================================
+// STATE: FIND OB2 (Refined Order Block after CHoCH)
+// ============================================================================
+if setupState == "waiting_ob2"
+    if setupDirection == "long"
+        // OB2 for LONG: Last bearish candle(s) before CHoCH
+        // High = highest high of bearish candles
+        // Low = lowest low (wick) of the swing that created CHoCH
+        float maxH = na
+        float minL = na
+        int startB = na
+        
+        for i = 1 to 5
+            if close[i] < open[i]  // Bearish candle
+                if na(maxH) or high[i] > maxH
+                    maxH := high[i]
+                if na(minL) or low[i] < minL
+                    minL := low[i]
+                if na(startB)
+                    startB := bar_index - i
+        
+        if not na(maxH) and not na(minL)
+            ob2High := maxH
+            ob2Low := minL
+            ob2Bar := startB
+            setupState := "waiting_entry"
+            
+            if showOB2
+                ob2Box := box.new(ob2Bar, ob2High, bar_index + 50, ob2Low, 
+                                 border_color=bullColor, bgcolor=ob2BullColor, border_width=2)
+                label.new(ob2Bar, ob2High, "OB 2.0", color=bullColor, textcolor=color.white, 
+                         size=size.tiny, style=label.style_label_down)
+    
+    if setupDirection == "short"
+        // OB2 for SHORT: Last bullish candle(s) before CHoCH
+        float maxH = na
+        float minL = na
+        int startB = na
+        
+        for i = 1 to 5
+            if close[i] > open[i]  // Bullish candle
+                if na(maxH) or high[i] > maxH
+                    maxH := high[i]
+                if na(minL) or low[i] < minL
+                    minL := low[i]
+                if na(startB)
+                    startB := bar_index - i
+        
+        if not na(maxH) and not na(minL)
+            ob2High := maxH
+            ob2Low := minL
+            ob2Bar := startB
+            setupState := "waiting_entry"
+            
+            if showOB2
+                ob2Box := box.new(ob2Bar, ob2High, bar_index + 50, ob2Low, 
+                                 border_color=bearColor, bgcolor=ob2BearColor, border_width=2)
+                label.new(ob2Bar, ob2Low, "OB 2.0", color=bearColor, textcolor=color.white, 
+                         size=size.tiny, style=label.style_label_up)
+
+// ============================================================================
+// STATE: WAITING FOR ENTRY AT OB2 (with PDH/PDL Targeting)
+// ============================================================================
+var bool inTrade = false
+
+if setupState == "waiting_entry" and not inTrade
+    if setupDirection == "long"
+        // Price enters OB2 zone
+        bool priceInZone = low <= ob2High and high >= ob2Low
+        
+        if priceInZone
+            float entryPrice = close
+            float stopLoss = ob2Low - slBuffer
+            float risk = entryPrice - stopLoss
+            float defaultTP = entryPrice + (risk * minRR)
+            float takeProfit = defaultTP
+            string tpLabel = "TP (1:3)"
+            
+            // PDH/PDL Targeting Logic for LONG:
+            // If current day high is already hit before 1:3 would be reached, use PDH as TP
+            if usePDHPDL and not na(pdh)
+                // Check if current day high was already taken (price reached it)
+                bool currentDayHighTaken = currentDayHigh >= defaultTP * 0.99  // Within 1% of TP
+                
+                // If current day high already taken OR if PDH is beyond our TP, use PDH
+                if currentDayHighTaken or (pdh > entryPrice and pdh > defaultTP)
+                    takeProfit := pdh
+                    tpLabel := "TP (PDH)"
+            
+            if risk > 0 and showSignals
+                inTrade := true
+                setupState := "in_trade"
+                
+                label.new(bar_index, low, "▲ LONG\nEntry: " + str.tostring(entryPrice, "#.##") + 
+                         "\nSL: " + str.tostring(stopLoss, "#.##") + 
+                         "\n" + tpLabel + ": " + str.tostring(takeProfit, "#.##"), 
+                         color=bullColor, textcolor=color.white, style=label.style_label_up, size=size.normal)
+                line.new(bar_index, stopLoss, bar_index + 20, stopLoss, color=bearColor, width=2, style=line.style_dashed)
+                line.new(bar_index, takeProfit, bar_index + 20, takeProfit, color=bullColor, width=2, style=line.style_dashed)
+    
+    if setupDirection == "short"
+        // Price enters OB2 zone
+        bool priceInZone = high >= ob2Low and low <= ob2High
+        
+        if priceInZone
+            float entryPrice = close
+            float stopLoss = ob2High + slBuffer
+            float risk = stopLoss - entryPrice
+            float defaultTP = entryPrice - (risk * minRR)
+            float takeProfit = defaultTP
+            string tpLabel = "TP (1:3)"
+            
+            // PDH/PDL Targeting Logic for SHORT:
+            // If current day low is already hit before 1:3 would be reached, use PDL as TP
+            if usePDHPDL and not na(pdl)
+                // Check if current day low was already taken (price reached it)
+                bool currentDayLowTaken = currentDayLow <= defaultTP * 1.01  // Within 1% of TP
+                
+                // If current day low already taken OR if PDL is beyond our TP, use PDL
+                if currentDayLowTaken or (pdl < entryPrice and pdl < defaultTP)
+                    takeProfit := pdl
+                    tpLabel := "TP (PDL)"
+            
+            if risk > 0 and showSignals
+                inTrade := true
+                setupState := "in_trade"
+                
+                label.new(bar_index, high, "▼ SHORT\nEntry: " + str.tostring(entryPrice, "#.##") + 
+                         "\nSL: " + str.tostring(stopLoss, "#.##") + 
+                         "\n" + tpLabel + ": " + str.tostring(takeProfit, "#.##"), 
+                         color=bearColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
+                line.new(bar_index, stopLoss, bar_index + 20, stopLoss, color=bearColor, width=2, style=line.style_dashed)
+                line.new(bar_index, takeProfit, bar_index + 20, takeProfit, color=bullColor, width=2, style=line.style_dashed)
+
+// Reset trade state at new day
+if isNewDay
+    inTrade := false
+
+// ============================================================================
+// DEBUG INFO TABLE
+// ============================================================================
+var table debugTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(debugTable, 0, 0, "ICT OB 2.0 v2", text_color=color.white, text_size=size.normal)
+    table.cell(debugTable, 1, 0, "", text_color=color.white)
+    
+    table.cell(debugTable, 0, 1, "Trend:", text_color=color.gray)
+    table.cell(debugTable, 1, 1, currentTrend, 
+               text_color=currentTrend == "bullish" ? bullColor : currentTrend == "bearish" ? bearColor : color.gray)
+    
+    table.cell(debugTable, 0, 2, "BOS Count:", text_color=color.gray)
+    table.cell(debugTable, 1, 2, currentTrend == "bullish" ? str.tostring(bullishBOSCount) : str.tostring(bearishBOSCount), 
+               text_color=color.white)
+    
+    table.cell(debugTable, 0, 3, "Setup State:", text_color=color.gray)
+    table.cell(debugTable, 1, 3, setupState, text_color=color.yellow)
+    
+    table.cell(debugTable, 0, 4, "Direction:", text_color=color.gray)
+    table.cell(debugTable, 1, 4, setupDirection, 
+               text_color=setupDirection == "long" ? bullColor : setupDirection == "short" ? bearColor : color.gray)
+    
+    table.cell(debugTable, 0, 5, "OB1:", text_color=color.gray)
+    table.cell(debugTable, 1, 5, not na(ob1High) ? str.tostring(ob1High, "#.##") + "-" + str.tostring(ob1Low, "#.##") : "None", 
+               text_color=color.white)
+    
+    table.cell(debugTable, 0, 6, "OB2:", text_color=color.gray)
+    table.cell(debugTable, 1, 6, not na(ob2High) ? str.tostring(ob2High, "#.##") + "-" + str.tostring(ob2Low, "#.##") : "None", 
+               text_color=color.white)
+    
+    table.cell(debugTable, 0, 7, "CHoCH Level:", text_color=color.gray)
+    table.cell(debugTable, 1, 7, not na(chochLevel) ? str.tostring(chochLevel, "#.##") : "None", text_color=color.white)
+    
+    table.cell(debugTable, 0, 8, "PDH:", text_color=color.gray)
+    table.cell(debugTable, 1, 8, not na(pdh) ? str.tostring(pdh, "#.##") : "N/A", text_color=color.orange)
+    
+    table.cell(debugTable, 0, 9, "PDL:", text_color=color.gray)
+    table.cell(debugTable, 1, 9, not na(pdl) ? str.tostring(pdl, "#.##") : "N/A", text_color=color.purple)
+    
+    table.cell(debugTable, 0, 10, "Day H/L:", text_color=color.gray)
+    table.cell(debugTable, 1, 10, str.tostring(currentDayHigh, "#.##") + "/" + str.tostring(currentDayLow, "#.##"), text_color=color.white)
+    
+    table.cell(debugTable, 0, 11, "In Trade:", text_color=color.gray)
+    table.cell(debugTable, 1, 11, inTrade ? "YES" : "NO", text_color=inTrade ? color.green : color.red)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(setupState == "waiting_entry" and setupDirection == "long", "Long Setup Ready", "ICT OB 2.0 Long Entry Zone Active")
+alertcondition(setupState == "waiting_entry" and setupDirection == "short", "Short Setup Ready", "ICT OB 2.0 Short Entry Zone Active")

@@ -1,0 +1,717 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ICT OB 2.0 Strategy - Converted from Python Backtest Framework
+
+//@version=5
+indicator("ICT OB 2.0 Strategy", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+grp_structure = "📊 Market Structure"
+swingLookback = input.int(5, "Swing Lookback", minval=3, maxval=10, group=grp_structure)
+bosRequired = input.int(2, "BOS Required for Trend", minval=1, maxval=5, group=grp_structure)
+
+grp_fib = "📐 Fibonacci Pullback"
+fibLevelMin = input.float(0.3, "Min Pullback (30%)", minval=0.1, maxval=0.9, step=0.05, group=grp_fib)
+
+grp_entry = "🎯 Entry Settings"
+minRR = input.float(3.0, "Minimum R:R", minval=1.0, maxval=10.0, step=0.5, group=grp_entry)
+slBuffer = input.float(0.5, "SL Buffer (points)", minval=0.0, maxval=5.0, step=0.1, group=grp_entry)
+useOB2Entry = input.bool(true, "Wait for OB 2.0 Retest", group=grp_entry)
+useCandleConfirmation = input.bool(true, "Require Rejection/Engulfing Candle", group=grp_entry)
+
+grp_filters = "🔍 Filters"
+useVWAPFilter = input.bool(true, "OB 2.0 Inside VWAP Bands", group=grp_filters)
+vwapTolerance = input.float(3.0, "VWAP Band Tolerance", minval=0.0, maxval=10.0, group=grp_filters)
+useLiqSweepFilter = input.bool(true, "Require Liquidity Sweep", group=grp_filters)
+
+grp_visual = "🎨 Visuals"
+showSwings = input.bool(true, "Show Swing Points", group=grp_visual)
+showBOS = input.bool(true, "Show BOS Lines", group=grp_visual)
+showOB1 = input.bool(false, "Show OB 1 Zones", group=grp_visual)
+showOB2 = input.bool(true, "Show OB 2.0 Zones", group=grp_visual)
+showVWAP = input.bool(true, "Show VWAP Bands", group=grp_visual)
+showSignals = input.bool(true, "Show Entry Signals", group=grp_visual)
+
+grp_session = "⏰ Session Filter"
+useSessionFilter = input.bool(true, "Filter by Session", group=grp_session)
+sessionStart = input.session("0930-1545", "NY Session", group=grp_session)
+
+grp_targets = "🎯 Target Levels"
+showDayLevels = input.bool(true, "Show Day H/L & PDH/PDL Lines", group=grp_targets)
+
+// Colors
+bullColor = color.new(#26a69a, 0)
+bearColor = color.new(#ef5350, 0)
+ob1Color = color.new(color.blue, 80)
+ob2BullColor = color.new(#26a69a, 70)
+ob2BearColor = color.new(#ef5350, 70)
+vwapColor = color.new(color.purple, 0)
+
+// ============================================================================
+// VWAP CALCULATION (Anchored to Session)
+// ============================================================================
+var float vwapSum = 0.0
+var float volumeSum = 0.0
+var float vwapSqSum = 0.0
+
+isNewSession = ta.change(time("D")) != 0
+
+if isNewSession
+    vwapSum := 0.0
+    volumeSum := 0.0
+    vwapSqSum := 0.0
+
+typicalPrice = (high + low + close) / 3
+vwapSum += typicalPrice * volume
+volumeSum += volume
+vwapSqSum += typicalPrice * typicalPrice * volume
+
+vwap_value = volumeSum > 0 ? vwapSum / volumeSum : close
+variance = volumeSum > 0 ? (vwapSqSum / volumeSum) - (vwap_value * vwap_value) : 0
+stdev = math.sqrt(math.max(variance, 0))
+vwapUpper = vwap_value + stdev
+vwapLower = vwap_value - stdev
+
+plot(showVWAP ? vwap_value : na, "VWAP", vwapColor, 2)
+plot(showVWAP ? vwapUpper : na, "VWAP Upper", color.new(vwapColor, 50), 1, plot.style_circles)
+plot(showVWAP ? vwapLower : na, "VWAP Lower", color.new(vwapColor, 50), 1, plot.style_circles)
+
+// ============================================================================
+// PDH/PDL & CURRENT DAY H/L TRACKING
+// ============================================================================
+// Previous Day High/Low
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+// Track current day's high and low
+var float currentDayHigh = na
+var float currentDayLow = na
+
+if isNewSession
+    currentDayHigh := high
+    currentDayLow := low
+else
+    currentDayHigh := math.max(nz(currentDayHigh, high), high)
+    currentDayLow := math.min(nz(currentDayLow, low), low)
+
+// Plot day levels
+var line cdhLine = na
+var line cdlLine = na
+var line pdhLine = na
+var line pdlLine = na
+var label cdhLabel = na
+var label cdlLabel = na
+var label pdhLabel = na
+var label pdlLabel = na
+
+if showDayLevels and isNewSession
+    // Delete old lines
+    line.delete(cdhLine)
+    line.delete(cdlLine)
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    label.delete(cdhLabel)
+    label.delete(cdlLabel)
+    label.delete(pdhLabel)
+    label.delete(pdlLabel)
+    
+    // PDH/PDL lines
+    if not na(pdh)
+        pdhLine := line.new(bar_index, pdh, bar_index + 1, pdh, color=color.new(color.orange, 30), width=1, style=line.style_dashed, extend=extend.right)
+        pdhLabel := label.new(bar_index, pdh, "PDH", color=color.new(color.orange, 80), textcolor=color.orange, size=size.tiny, style=label.style_label_left)
+    if not na(pdl)
+        pdlLine := line.new(bar_index, pdl, bar_index + 1, pdl, color=color.new(color.orange, 30), width=1, style=line.style_dashed, extend=extend.right)
+        pdlLabel := label.new(bar_index, pdl, "PDL", color=color.new(color.orange, 80), textcolor=color.orange, size=size.tiny, style=label.style_label_left)
+
+// Update current day high/low lines dynamically
+if showDayLevels and not isNewSession
+    if not na(cdhLine)
+        line.set_y1(cdhLine, currentDayHigh)
+        line.set_y2(cdhLine, currentDayHigh)
+    if not na(cdlLine)
+        line.set_y1(cdlLine, currentDayLow)
+        line.set_y2(cdlLine, currentDayLow)
+
+// ============================================================================
+// SWING HIGH/LOW DETECTION
+// ============================================================================
+isSwingHigh = ta.pivothigh(high, swingLookback, swingLookback)
+isSwingLow = ta.pivotlow(low, swingLookback, swingLookback)
+
+// Plot swing points (pivothigh/low return float, check not na)
+plotshape(showSwings and not na(isSwingHigh), "Swing High", shape.triangledown, location.abovebar, bearColor, size=size.tiny, offset=-swingLookback)
+plotshape(showSwings and not na(isSwingLow), "Swing Low", shape.triangleup, location.belowbar, bullColor, size=size.tiny, offset=-swingLookback)
+
+// ============================================================================
+// TRACK SWING LEVELS
+// ============================================================================
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+
+if not na(isSwingHigh)
+    lastSwingHigh := high[swingLookback]
+    lastSwingHighBar := bar_index - swingLookback
+
+if not na(isSwingLow)
+    lastSwingLow := low[swingLookback]
+    lastSwingLowBar := bar_index - swingLookback
+
+// ============================================================================
+// BOS DETECTION (Break of Structure) - WITH TREND CONFIRMATION & RETRACEMENT
+// ============================================================================
+var bool bullishBOS = false
+var bool bearishBOS = false
+var float bosLevel = na
+var int bosBar = na
+
+// Track BOS count for trend confirmation
+var int bullishBOSCount = 0
+var int bearishBOSCount = 0
+
+// Track the PROTECTED OB1 zone (Last Demand/Supply Zone)
+// Stay bullish until demand zone is broken, stay bearish until supply zone is broken
+var float protectedDemandHigh = na  // For bullish trend - OB1 high
+var float protectedDemandLow = na   // For bullish trend - OB1 low (invalidation level)
+var float protectedSupplyHigh = na  // For bearish trend - OB1 high (invalidation level)
+var float protectedSupplyLow = na   // For bearish trend - OB1 low
+var string confirmedTrend = "none"  // "bullish", "bearish", "none"
+
+// Track previous BOS for retracement requirement
+var float lastBullishBOSHigh = na   // High of the candle that created last bullish BOS
+var float lastBullishBOSLow = na    // Low point to measure retracement from
+var float lastBearishBOSLow = na    // Low of the candle that created last bearish BOS
+var float lastBearishBOSHigh = na   // High point to measure retracement from
+var bool bullishRetracementMet = true   // First BOS doesn't need retracement
+var bool bearishRetracementMet = true   // First BOS doesn't need retracement
+
+// Track liquidity sweeps for entry filter
+var bool bearishLiqSweepOccurred = false  // For LONG entries - need bearish sweep first
+var bool bullishLiqSweepOccurred = false  // For SHORT entries - need bullish sweep first
+
+// Calculate retracement for next BOS validation
+// For bullish: Price must retrace 30% from last BOS high toward last swing low
+if bullishBOSCount > 0 and not na(lastBullishBOSHigh) and not na(lastBullishBOSLow)
+    float retracementRange = lastBullishBOSHigh - lastBullishBOSLow
+    float retracementLevel = lastBullishBOSHigh - (retracementRange * fibLevelMin)
+    if low <= retracementLevel
+        bullishRetracementMet := true
+
+// For bearish: Price must retrace 30% from last BOS low toward last swing high  
+if bearishBOSCount > 0 and not na(lastBearishBOSLow) and not na(lastBearishBOSHigh)
+    float retracementRange = lastBearishBOSHigh - lastBearishBOSLow
+    float retracementLevel = lastBearishBOSLow + (retracementRange * fibLevelMin)
+    if high >= retracementLevel
+        bearishRetracementMet := true
+
+// Bullish BOS: Close above last swing high (with retracement check for subsequent BOS)
+bool bullishBOS_raw = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bullishBOS_new = bullishBOS_raw and (bullishBOSCount == 0 or bullishRetracementMet)
+
+// Bearish BOS: Close below last swing low (with retracement check for subsequent BOS)
+bool bearishBOS_raw = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+bearishBOS_new = bearishBOS_raw and (bearishBOSCount == 0 or bearishRetracementMet)
+
+// Handle Bullish BOS
+if bullishBOS_new
+    // If we're in a confirmed bearish trend and this is just 1 bullish BOS, it's a liquidity sweep
+    if confirmedTrend == "bearish" and bearishBOSCount >= bosRequired
+        // Single opposite BOS = Liquidity Sweep, don't reset counts
+        bullishLiqSweepOccurred := true  // Mark for SHORT entry filter
+        if showBOS and not na(lastSwingHighBar)
+            line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color=color.new(color.yellow, 0), width=2, style=line.style_dotted)
+            label.new(bar_index, lastSwingHigh, "LIQ SWEEP ▲", color=color.new(color.yellow, 0), textcolor=color.black, size=size.small, style=label.style_label_down)
+        // Start counting bullish BOS but don't reset bearish count yet
+        bullishBOSCount := 1
+        // Track this BOS candle for retracement calculation
+        lastBullishBOSHigh := high
+        lastBullishBOSLow := lastSwingLow
+        bullishRetracementMet := false  // Next BOS needs retracement
+    else
+        // Normal bullish BOS counting
+        bullishBOSCount += 1
+        bearishBOSCount := 0
+        bullishBOS := true
+        bearishBOS := false
+        bosLevel := lastSwingHigh
+        bosBar := bar_index
+        
+        // Reset liquidity sweep flags when trend changes
+        bearishLiqSweepOccurred := false
+        bullishLiqSweepOccurred := false
+        
+        // Track this BOS candle for retracement calculation
+        lastBullishBOSHigh := high
+        lastBullishBOSLow := lastSwingLow
+        bullishRetracementMet := false  // Next BOS needs retracement
+        
+        // Confirm bullish trend after 2+ BOS
+        if bullishBOSCount >= bosRequired
+            confirmedTrend := "bullish"
+        
+        if showBOS and not na(lastSwingHighBar)
+            line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color=bullColor, width=2, style=line.style_dashed)
+            label.new(bar_index, lastSwingHigh, "BOS ▲ (" + str.tostring(bullishBOSCount) + ")", color=bullColor, textcolor=color.white, size=size.small, style=label.style_label_down)
+
+// Handle Bearish BOS
+if bearishBOS_new
+    // If we're in a confirmed bullish trend and this is just 1 bearish BOS, it's a liquidity sweep
+    if confirmedTrend == "bullish" and bullishBOSCount >= bosRequired
+        // Single opposite BOS = Liquidity Sweep, don't reset counts
+        bearishLiqSweepOccurred := true  // Mark for LONG entry filter
+        if showBOS and not na(lastSwingLowBar)
+            line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color=color.new(color.yellow, 0), width=2, style=line.style_dotted)
+            label.new(bar_index, lastSwingLow, "LIQ SWEEP ▼", color=color.new(color.yellow, 0), textcolor=color.black, size=size.small, style=label.style_label_up)
+        // Start counting bearish BOS but don't reset bullish count yet
+        bearishBOSCount := 1
+        // Track this BOS candle for retracement calculation
+        lastBearishBOSLow := low
+        lastBearishBOSHigh := lastSwingHigh
+        bearishRetracementMet := false  // Next BOS needs retracement
+    else
+        // Normal bearish BOS counting
+        bearishBOSCount += 1
+        bullishBOSCount := 0
+        bearishBOS := true
+        bullishBOS := false
+        bosLevel := lastSwingLow
+        bosBar := bar_index
+        
+        // Reset liquidity sweep flags when trend changes
+        bearishLiqSweepOccurred := false
+        bullishLiqSweepOccurred := false
+        
+        // Track this BOS candle for retracement calculation
+        lastBearishBOSLow := low
+        lastBearishBOSHigh := lastSwingHigh
+        bearishRetracementMet := false  // Next BOS needs retracement
+        
+        // Confirm bearish trend after 2+ BOS
+        if bearishBOSCount >= bosRequired
+            confirmedTrend := "bearish"
+        
+        if showBOS and not na(lastSwingLowBar)
+            line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color=bearColor, width=2, style=line.style_dashed)
+            label.new(bar_index, lastSwingLow, "BOS ▼ (" + str.tostring(bearishBOSCount) + ")", color=bearColor, textcolor=color.white, size=size.small, style=label.style_label_up)
+
+// CHECK IF PROTECTED ZONE IS INVALIDATED
+// If bullish and price closes below protected demand zone -> trend flip allowed
+bool demandInvalidated = confirmedTrend == "bullish" and not na(protectedDemandLow) and close < protectedDemandLow
+// If bearish and price closes above protected supply zone -> trend flip allowed
+bool supplyInvalidated = confirmedTrend == "bearish" and not na(protectedSupplyHigh) and close > protectedSupplyHigh
+
+if demandInvalidated
+    confirmedTrend := "none"  // Reset, now looking for bearish confirmation
+    bullishBOSCount := 0
+    if showBOS
+        label.new(bar_index, low, "DEMAND BROKEN", color=bearColor, textcolor=color.white, size=size.tiny, style=label.style_label_up)
+
+if supplyInvalidated
+    confirmedTrend := "none"  // Reset, now looking for bullish confirmation
+    bearishBOSCount := 0
+    if showBOS
+        label.new(bar_index, high, "SUPPLY BROKEN", color=bullColor, textcolor=color.white, size=size.tiny, style=label.style_label_down)
+
+// ============================================================================
+// PULLBACK DETECTION (Minimum 30% Fib Retracement)
+// ============================================================================
+var bool pullbackValid = false
+var float pullbackHigh = na
+var float pullbackLow = na
+
+// Calculate Fib levels (with NA protection)
+float fibRange = na
+float fib30Level = na
+
+if bullishBOS and not na(bosLevel) and not na(lastSwingLow)
+    fibRange := bosLevel - lastSwingLow
+    fib30Level := bosLevel - (fibLevelMin * fibRange)
+else if bearishBOS and not na(lastSwingHigh) and not na(bosLevel)
+    fibRange := lastSwingHigh - bosLevel
+    fib30Level := bosLevel + (fibLevelMin * fibRange)
+
+// Check pullback
+if bullishBOS and not na(fib30Level) and low <= fib30Level and not na(lastSwingLow) and close > lastSwingLow
+    pullbackValid := true
+    pullbackLow := low
+
+if bearishBOS and not na(fib30Level) and high >= fib30Level and not na(lastSwingHigh) and close < lastSwingHigh
+    pullbackValid := true
+    pullbackHigh := high
+
+// ============================================================================
+// ORDER BLOCK DETECTION
+// ============================================================================
+var float ob1High = na
+var float ob1Low = na
+var float ob2High = na
+var float ob2Low = na
+var int ob2StartBar = na
+var box ob2Box = na
+
+// Find OB 1 (Last 2-3 opposite candles before BOS)
+// Takes 2 candles minimum, or 3 if they are continuous (consecutive same color)
+findOB1() =>
+    float obHigh = na
+    float obLow = na
+    int candleCount = 0
+    
+    if bullishBOS
+        // Look for last 2-3 bearish candles before BOS
+        int consecutiveCount = 0
+        for i = 1 to 15
+            if close[i] < open[i]  // Bearish candle
+                consecutiveCount += 1
+                candleCount += 1
+                // Track highest high and lowest low
+                if na(obHigh) or high[i] > obHigh
+                    obHigh := high[i]
+                if na(obLow) or low[i] < obLow
+                    obLow := low[i]
+                // Take 2 candles min, or 3 if continuous
+                if candleCount >= 2
+                    bool nextBearish = i + 1 <= 15 and close[i + 1] < open[i + 1]
+                    if consecutiveCount >= 2 and nextBearish and candleCount < 3
+                        continue
+                    else
+                        break
+            else
+                if candleCount >= 2
+                    break
+                consecutiveCount := 0
+    else if bearishBOS
+        // Look for last 2-3 bullish candles before BOS
+        int consecutiveCount = 0
+        for i = 1 to 15
+            if close[i] > open[i]  // Bullish candle
+                consecutiveCount += 1
+                candleCount += 1
+                // Track highest high and lowest low
+                if na(obHigh) or high[i] > obHigh
+                    obHigh := high[i]
+                if na(obLow) or low[i] < obLow
+                    obLow := low[i]
+                // Take 2 candles min, or 3 if continuous
+                if candleCount >= 2
+                    bool nextBullish = i + 1 <= 15 and close[i + 1] > open[i + 1]
+                    if consecutiveCount >= 2 and nextBullish and candleCount < 3
+                        continue
+                    else
+                        break
+            else
+                if candleCount >= 2
+                    break
+                consecutiveCount := 0
+    [obHigh, obLow]
+
+// ============================================================================
+// CHoCH DETECTION (Change of Character) - REQUIRES TREND CONFIRMATION
+// ============================================================================
+var bool chochDetected = false
+var float chochLevel = na
+var int chochBar = na
+var string chochDirection = "none"  // "long" or "short"
+
+// Track swing levels at the time of BOS for CHoCH reference
+var float swingHighAtBearishBOS = na
+var float swingLowAtBullishBOS = na
+
+if bearishBOS_new
+    swingHighAtBearishBOS := lastSwingHigh
+
+if bullishBOS_new
+    swingLowAtBullishBOS := lastSwingLow
+
+// CHoCH for LONGS: 
+// 1. Must have confirmed bullish trend (2+ bullish BOS)
+// 2. Close above the swing high from when bearish structure was last established
+bool canChochLong = confirmedTrend == "bullish" and bullishBOSCount >= bosRequired
+chochLong = canChochLong and not na(swingHighAtBearishBOS) and close > swingHighAtBearishBOS and close[1] <= swingHighAtBearishBOS
+
+// CHoCH for SHORTS:
+// 1. Must have confirmed bearish trend (2+ bearish BOS) 
+// 2. Close below the swing low from when bullish structure was last established
+bool canChochShort = confirmedTrend == "bearish" and bearishBOSCount >= bosRequired
+chochShort = canChochShort and not na(swingLowAtBullishBOS) and close < swingLowAtBullishBOS and close[1] >= swingLowAtBullishBOS
+
+if chochLong and chochDirection != "long"
+    chochDetected := true
+    chochDirection := "long"
+    chochLevel := swingHighAtBearishBOS
+    chochBar := bar_index
+    label.new(bar_index, high, "CHoCH ▲", color=bullColor, textcolor=color.white, size=size.tiny, style=label.style_label_down)
+
+if chochShort and chochDirection != "short"
+    chochDetected := true
+    chochDirection := "short"
+    chochLevel := swingLowAtBullishBOS
+    chochBar := bar_index
+    label.new(bar_index, low, "CHoCH ▼", color=bearColor, textcolor=color.white, size=size.tiny, style=label.style_label_up)
+
+// ============================================================================
+// OB 2.0 DETECTION (After CHoCH)
+// ============================================================================
+findOB2(isBullish) =>
+    float ob2H = na
+    float ob2L = na
+    int startBar = na
+    
+    if isBullish
+        // Find last 3 bearish candles before CHoCH
+        float maxHigh = na
+        float minLow = na
+        for i = 1 to 5
+            if close[i] < open[i]  // Bearish candle
+                if na(maxHigh) or high[i] > maxHigh
+                    maxHigh := high[i]
+                if na(minLow) or low[i] < minLow
+                    minLow := low[i]
+                startBar := bar_index - i
+                break
+        ob2H := maxHigh
+        ob2L := minLow
+    else
+        // Find last 3 bullish candles before CHoCH
+        float maxHigh = na
+        float minLow = na
+        for i = 1 to 5
+            if close[i] > open[i]  // Bullish candle
+                if na(maxHigh) or high[i] > maxHigh
+                    maxHigh := high[i]
+                if na(minLow) or low[i] < minLow
+                    minLow := low[i]
+                startBar := bar_index - i
+                break
+        ob2H := maxHigh
+        ob2L := minLow
+    
+    [ob2H, ob2L, startBar]
+
+// Create OB2 zone after CHoCH
+if chochLong and chochDirection == "long" and showOB2
+    [h, l, s] = findOB2(true)
+    ob2High := h
+    ob2Low := l
+    ob2StartBar := s
+    // Set protected demand zone (OB1 for bullish setup)
+    protectedDemandHigh := h
+    protectedDemandLow := l
+    if not na(ob2High) and not na(ob2Low) and not na(ob2StartBar)
+        ob2Box := box.new(ob2StartBar, ob2High, bar_index + 50, ob2Low, border_color=bullColor, bgcolor=ob2BullColor, border_width=2)
+        label.new(ob2StartBar, ob2High, "OB 2.0 (LONG)", color=bullColor, textcolor=color.white, size=size.tiny, style=label.style_label_down)
+
+if chochShort and chochDirection == "short" and showOB2
+    [h, l, s] = findOB2(false)
+    ob2High := h
+    ob2Low := l
+    ob2StartBar := s
+    // Set protected supply zone (OB1 for bearish setup)
+    protectedSupplyHigh := h
+    protectedSupplyLow := l
+    if not na(ob2High) and not na(ob2Low) and not na(ob2StartBar)
+        ob2Box := box.new(ob2StartBar, ob2High, bar_index + 50, ob2Low, border_color=bearColor, bgcolor=ob2BearColor, border_width=2)
+        label.new(ob2StartBar, ob2Low, "OB 2.0 (SHORT)", color=bearColor, textcolor=color.white, size=size.tiny, style=label.style_label_up)
+
+// ============================================================================
+// CANDLE CONFIRMATION (Rejection / Engulfing)
+// ============================================================================
+// Rejection candle detection
+isRejectionBull() =>
+    bodySize = math.abs(close - open)
+    fullRange = high - low
+    lowerWick = math.min(open, close) - low
+    fullRange > 0 and (lowerWick / fullRange) >= 0.5 and (bodySize / fullRange) <= 0.4 and close > open
+
+isRejectionBear() =>
+    bodySize = math.abs(close - open)
+    fullRange = high - low
+    upperWick = high - math.max(open, close)
+    fullRange > 0 and (upperWick / fullRange) >= 0.5 and (bodySize / fullRange) <= 0.4 and close < open
+
+// Engulfing candle detection
+isEngulfingBull() =>
+    prevBearish = close[1] < open[1]
+    currBullish = close > open
+    engulfs = open <= close[1] and close >= open[1]
+    prevBearish and currBullish and engulfs
+
+isEngulfingBear() =>
+    prevBullish = close[1] > open[1]
+    currBearish = close < open
+    engulfs = open >= close[1] and close <= open[1]
+    prevBullish and currBearish and engulfs
+
+bullConfirmation = isRejectionBull() or isEngulfingBull()
+bearConfirmation = isRejectionBear() or isEngulfingBear()
+
+// ============================================================================
+// OB2 INSIDE VWAP BANDS CHECK
+// ============================================================================
+ob2InsideVWAP(ob2H, ob2L, tolerance) =>
+    upperCheck = ob2H <= (vwapUpper + tolerance)
+    lowerCheck = ob2L >= (vwapLower - tolerance)
+    upperCheck and lowerCheck
+
+// ============================================================================
+// ENTRY SIGNALS
+// ============================================================================
+var bool inTrade = false
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit = na
+
+// Session filter
+inSession = useSessionFilter ? not na(time(timeframe.period, sessionStart)) : true
+
+// LONG Entry conditions - requires bullish trend confirmation + bearish liquidity sweep + engulfing
+longCondition = not inTrade and inSession and 
+                 not na(ob2High) and not na(ob2Low) and
+                 confirmedTrend == "bullish" and chochDirection == "long" and
+                 low <= ob2High and high >= ob2Low and  // Price in OB2 zone
+                 (not useLiqSweepFilter or bearishLiqSweepOccurred) and  // Bearish sweep for longs
+                 (not useCandleConfirmation or isEngulfingBull()) and  // Engulfing only
+                 (not useVWAPFilter or ob2InsideVWAP(ob2High, ob2Low, vwapTolerance))
+
+// SHORT Entry conditions - requires bearish trend confirmation + bullish liquidity sweep + engulfing
+shortCondition = not inTrade and inSession and
+                  not na(ob2High) and not na(ob2Low) and
+                  confirmedTrend == "bearish" and chochDirection == "short" and
+                  high >= ob2Low and low <= ob2High and  // Price in OB2 zone
+                  (not useLiqSweepFilter or bullishLiqSweepOccurred) and  // Bullish sweep for shorts
+                  (not useCandleConfirmation or isEngulfingBear()) and  // Engulfing only
+                  (not useVWAPFilter or ob2InsideVWAP(ob2High, ob2Low, vwapTolerance))
+
+// Execute entries - TP Priority: Current Day H/L -> PDH/PDL -> 1:3 R:R
+if longCondition and showSignals
+    entryPrice := close
+    stopLoss := ob2Low - slBuffer
+    float risk = entryPrice - stopLoss
+    float standardTP = entryPrice + (risk * minRR)
+    string tpLabel = "1:" + str.tostring(minRR, "#")
+    
+    // TP Priority for LONG:
+    // 1. Current Day High (if gives at least 1:3)
+    // 2. PDH (if gives at least 1:3)
+    // 3. Standard 1:3
+    if not na(currentDayHigh) and currentDayHigh > entryPrice and (currentDayHigh - entryPrice) >= (risk * minRR)
+        takeProfit := currentDayHigh
+        tpLabel := "CDH"
+    else if not na(pdh) and pdh > entryPrice and (pdh - entryPrice) >= (risk * minRR)
+        takeProfit := pdh
+        tpLabel := "PDH"
+    else
+        takeProfit := standardTP
+        tpLabel := "1:" + str.tostring(minRR, "#")
+    
+    // Calculate actual R:R for display
+    float actualRR = (takeProfit - entryPrice) / risk
+    
+    inTrade := true
+    
+    label.new(bar_index, low, "▲ LONG\nEntry: " + str.tostring(entryPrice, "#.##") + "\nSL: " + str.tostring(stopLoss, "#.##") + "\nTP (" + tpLabel + "): " + str.tostring(takeProfit, "#.##") + "\nR:R = 1:" + str.tostring(actualRR, "#.#"), 
+              color=bullColor, textcolor=color.white, style=label.style_label_up, size=size.normal)
+    line.new(bar_index, stopLoss, bar_index + 20, stopLoss, color=bearColor, width=2, style=line.style_dashed)
+    line.new(bar_index, takeProfit, bar_index + 20, takeProfit, color=bullColor, width=2, style=line.style_dashed)
+
+if shortCondition and showSignals
+    entryPrice := close
+    stopLoss := ob2High + slBuffer
+    float risk = stopLoss - entryPrice
+    float standardTP = entryPrice - (risk * minRR)
+    string tpLabel = "1:" + str.tostring(minRR, "#")
+    
+    // TP Priority for SHORT:
+    // 1. Current Day Low (if gives at least 1:3)
+    // 2. PDL (if gives at least 1:3)
+    // 3. Standard 1:3
+    if not na(currentDayLow) and currentDayLow < entryPrice and (entryPrice - currentDayLow) >= (risk * minRR)
+        takeProfit := currentDayLow
+        tpLabel := "CDL"
+    else if not na(pdl) and pdl < entryPrice and (entryPrice - pdl) >= (risk * minRR)
+        takeProfit := pdl
+        tpLabel := "PDL"
+    else
+        takeProfit := standardTP
+        tpLabel := "1:" + str.tostring(minRR, "#")
+    
+    // Calculate actual R:R for display
+    float actualRR = (entryPrice - takeProfit) / risk
+    
+    inTrade := true
+    
+    label.new(bar_index, high, "▼ SHORT\nEntry: " + str.tostring(entryPrice, "#.##") + "\nSL: " + str.tostring(stopLoss, "#.##") + "\nTP (" + tpLabel + "): " + str.tostring(takeProfit, "#.##") + "\nR:R = 1:" + str.tostring(actualRR, "#.#"), 
+              color=bearColor, textcolor=color.white, style=label.style_label_down, size=size.normal)
+    line.new(bar_index, stopLoss, bar_index + 20, stopLoss, color=bearColor, width=2, style=line.style_dashed)
+    line.new(bar_index, takeProfit, bar_index + 20, takeProfit, color=bullColor, width=2, style=line.style_dashed)
+
+// Reset trade state at new day
+if isNewSession
+    inTrade := false
+    chochDetected := false
+    chochDirection := "none"
+    ob2High := na
+    ob2Low := na
+    // Don't reset BOS count or protected zones - they persist across days
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(longCondition, "Long Entry", "ICT OB 2.0 Long Entry Signal")
+alertcondition(shortCondition, "Short Entry", "ICT OB 2.0 Short Entry Signal")
+
+// ============================================================================
+// INFO TABLE
+// ============================================================================
+var table infoTable = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "ICT OB 2.0 Strategy", text_color=color.white, text_size=size.normal)
+    table.cell(infoTable, 1, 0, "", text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Confirmed Trend:", text_color=color.gray)
+    table.cell(infoTable, 1, 1, confirmedTrend == "bullish" ? "BULLISH" : confirmedTrend == "bearish" ? "BEARISH" : "NONE", 
+               text_color=confirmedTrend == "bullish" ? bullColor : confirmedTrend == "bearish" ? bearColor : color.gray)
+    
+    table.cell(infoTable, 0, 2, "BOS Count:", text_color=color.gray)
+    table.cell(infoTable, 1, 2, bullishBOSCount > 0 ? "Bull: " + str.tostring(bullishBOSCount) : "Bear: " + str.tostring(bearishBOSCount), 
+               text_color=bullishBOSCount > 0 ? bullColor : bearColor)
+    
+    table.cell(infoTable, 0, 3, "Retracement:", text_color=color.gray)
+    string retText = confirmedTrend == "bullish" ? (bullishRetracementMet ? "30% MET ✓" : "WAITING...") : confirmedTrend == "bearish" ? (bearishRetracementMet ? "30% MET ✓" : "WAITING...") : "N/A"
+    table.cell(infoTable, 1, 3, retText, text_color=confirmedTrend == "bullish" ? (bullishRetracementMet ? color.green : color.orange) : confirmedTrend == "bearish" ? (bearishRetracementMet ? color.green : color.orange) : color.gray)
+    
+    table.cell(infoTable, 0, 4, "Liq Sweep:", text_color=color.gray)
+    string sweepText = confirmedTrend == "bullish" ? (bearishLiqSweepOccurred ? "BEAR ▼ ✓" : "WAITING...") : confirmedTrend == "bearish" ? (bullishLiqSweepOccurred ? "BULL ▲ ✓" : "WAITING...") : "N/A"
+    table.cell(infoTable, 1, 4, sweepText, text_color=confirmedTrend == "bullish" ? (bearishLiqSweepOccurred ? color.yellow : color.orange) : confirmedTrend == "bearish" ? (bullishLiqSweepOccurred ? color.yellow : color.orange) : color.gray)
+    
+    table.cell(infoTable, 0, 5, "CHoCH:", text_color=color.gray)
+    table.cell(infoTable, 1, 5, chochDirection == "long" ? "▲ LONG" : chochDirection == "short" ? "▼ SHORT" : "Waiting", 
+               text_color=chochDirection == "long" ? bullColor : chochDirection == "short" ? bearColor : color.orange)
+    
+    table.cell(infoTable, 0, 6, "OB 2.0:", text_color=color.gray)
+    table.cell(infoTable, 1, 6, not na(ob2High) ? str.tostring(ob2High, "#.##") + " - " + str.tostring(ob2Low, "#.##") : "None", 
+               text_color=color.white)
+    
+    table.cell(infoTable, 0, 7, "Protected Zone:", text_color=color.gray)
+    string zoneText = confirmedTrend == "bullish" and not na(protectedDemandLow) ? "Demand: " + str.tostring(protectedDemandLow, "#.##") : confirmedTrend == "bearish" and not na(protectedSupplyHigh) ? "Supply: " + str.tostring(protectedSupplyHigh, "#.##") : "None"
+    table.cell(infoTable, 1, 7, zoneText, text_color=color.yellow)
+    
+    table.cell(infoTable, 0, 8, "Day H/L:", text_color=color.gray)
+    table.cell(infoTable, 1, 8, str.tostring(currentDayHigh, "#.##") + " / " + str.tostring(currentDayLow, "#.##"), text_color=color.aqua)
+    
+    table.cell(infoTable, 0, 9, "PDH/PDL:", text_color=color.gray)
+    table.cell(infoTable, 1, 9, not na(pdh) ? str.tostring(pdh, "#.##") + " / " + str.tostring(pdl, "#.##") : "N/A", text_color=color.orange)
+    
+    table.cell(infoTable, 0, 10, "VWAP:", text_color=color.gray)
+    table.cell(infoTable, 1, 10, str.tostring(vwap_value, "#.##"), text_color=vwapColor)
+    
+    table.cell(infoTable, 0, 11, "Session:", text_color=color.gray)
+    table.cell(infoTable, 1, 11, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.green : color.red)
+    
+    table.cell(infoTable, 0, 12, "Engulfing Only:", text_color=color.gray)
+    table.cell(infoTable, 1, 12, useCandleConfirmation ? "ON" : "OFF", 
+               text_color=useCandleConfirmation ? color.green : color.gray)
+    
+    table.cell(infoTable, 0, 13, "Min R:R:", text_color=color.gray)
+    table.cell(infoTable, 1, 13, "1:" + str.tostring(minRR, "#.#"), text_color=color.white)

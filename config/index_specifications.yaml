@@ -1,0 +1,306 @@
+# ============================================================================
+# INDEX SPECIFICATIONS - Market Details from MT4/MT5
+# ============================================================================
+# Risk tiers based on filter quality:
+#   - High Quality (CVD + OB2 VWAP + Sweep): 1.0%
+#   - Medium Quality (CVD + OB2 VWAP): 0.5%
+#   - Base Quality (OB2 VWAP only): 0.25%
+# ============================================================================
+
+risk_tiers:
+  high_quality:    # CVD + OB2 VWAP + Liquidity Sweep
+    risk_percent: 0.01
+    filters: [cvd, ob2_vwap, liquidity_sweep]
+  medium_quality:  # CVD + OB2 VWAP
+    risk_percent: 0.005
+    filters: [cvd, ob2_vwap]
+  base_quality:    # OB2 VWAP alone
+    risk_percent: 0.0025
+    filters: [ob2_vwap]
+
+# ============================================================================
+# US INDICES
+# ============================================================================
+
+SPX500:
+  symbol: SPX500
+  description: "S&P 500 CFD"
+  contract_size: 10
+  tick_size: 0.01
+  tick_value: 0.01
+  currency: USD
+  timezone: "America/New_York"
+  mt4_timezone: "Europe/Helsinki"  # EET/EEST
+  
+  trading_hours:
+    start: "09:30"
+    end: "16:00"
+    force_close: "15:45"
+  
+  market_breaks: []  # No break
+  
+  data:
+    file_path: data/raw/spx500_1min.csv
+    date_range:
+      start: "2025-10-24"
+      end: "2026-02-06"
+
+US30:
+  symbol: US30
+  description: "Dow Jones 30 CFD"
+  contract_size: 10
+  tick_size: 0.01
+  tick_value: 0.01
+  currency: USD
+  timezone: "America/New_York"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "09:30"
+    end: "16:00"
+    force_close: "15:45"
+  
+  market_breaks: []
+  
+  data:
+    file_path: data/raw/US30_M1.csv
+    date_range:
+      start: "2025-11-13"
+      end: "2026-02-06"
+
+NDX100:
+  symbol: NDX100
+  description: "NASDAQ 100 CFD"
+  contract_size: 10
+  tick_size: 0.01
+  tick_value: 0.01
+  currency: USD
+  timezone: "America/New_York"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "09:30"
+    end: "16:00"
+    force_close: "15:45"
+  
+  market_breaks: []
+  
+  data:
+    file_path: data/raw/NDX100_PERIOD_M1.csv
+    date_range:
+      start: "2025-12-26"
+      end: "2026-02-06"
+
+# ============================================================================
+# EUROPEAN INDICES
+# ============================================================================
+
+UK100:
+  symbol: UK100
+  description: "FTSE 100 CFD"
+  contract_size: 10
+  tick_size: 0.01
+  tick_value: 0.01
+  currency: GBP
+  timezone: "Europe/London"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "08:00"
+    end: "16:30"
+    force_close: "16:15"
+  
+  market_breaks: []
+  
+  data:
+    file_path: data/raw/UK100_PERIOD_M1.csv
+    date_range:
+      start: "2025-11-12"
+      end: "2026-02-06"
+
+GER30:
+  symbol: GER30
+  description: "DAX 30 CFD"
+  contract_size: 10
+  tick_size: 0.01
+  tick_value: 0.01
+  currency: EUR
+  timezone: "Europe/Berlin"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "09:00"
+    end: "17:30"
+    force_close: "17:15"
+  
+  market_breaks: []
+  
+  data:
+    file_path: data/raw/GER30_PERIOD_M1.csv
+    date_range:
+      start: "2025-11-10"
+      end: "2026-02-06"
+
+FRA40:
+  symbol: FRA40
+  description: "CAC 40 CFD"
+  contract_size: 10
+  tick_size: 0.01
+  tick_value: 0.01
+  currency: EUR
+  timezone: "Europe/Paris"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "09:00"
+    end: "17:30"
+    force_close: "17:15"
+  
+  market_breaks: []
+  
+  data:
+    file_path: data/raw/FRA40_PERIOD_M1.csv
+    date_range:
+      start: "2025-11-12"
+      end: "2026-02-06"
+
+# ============================================================================
+# ASIAN INDICES
+# ============================================================================
+
+JP225:
+  symbol: JP225
+  description: "Nikkei 225 CFD"
+  contract_size: 10
+  tick_size: 1.0
+  tick_value: 0.01
+  currency: JPY
+  timezone: "Asia/Tokyo"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "09:00"
+    end: "15:00"
+    force_close: "14:55"
+  
+  # Japan has a lunch break!
+  market_breaks:
+    - start: "11:30"
+      end: "12:30"
+      description: "Lunch Break"
+  
+  data:
+    file_path: data/raw/JP225_PERIOD_M1.csv
+    date_range:
+      start: "2025-11-13"
+      end: "2026-02-06"
+
+HK50:
+  symbol: HK50
+  description: "Hang Seng 50 CFD"
+  contract_size: 10
+  tick_size: 1.0
+  tick_value: 0.01
+  currency: HKD
+  timezone: "Asia/Hong_Kong"
+  mt4_timezone: "Europe/Helsinki"
+  
+  trading_hours:
+    start: "09:30"
+    end: "16:00"
+    force_close: "15:50"
+  
+  # Hong Kong has a lunch break!
+  market_breaks:
+    - start: "12:00"
+      end: "13:00"
+      description: "Lunch Break"
+  
+  data:
+    file_path: data/raw/HK50_PERIOD_M1.csv
+    date_range:
+      start: "2025-11-12"
+      end: "2026-02-06"
+
+# ============================================================================
+# FILTER COMBINATIONS FOR TESTING
+# ============================================================================
+
+filter_combinations:
+  - name: "All Filters (High Quality)"
+    id: "all_filters"
+    use_cvd_filter: true
+    use_liquidity_sweep_filter: true
+    use_ob2_vwap_filter: true
+    risk_tier: "high_quality"
+    
+  - name: "CVD + OB2 VWAP (Medium Quality)"
+    id: "cvd_ob2vwap"
+    use_cvd_filter: true
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: true
+    risk_tier: "medium_quality"
+    
+  - name: "CVD + Sweep"
+    id: "cvd_sweep"
+    use_cvd_filter: true
+    use_liquidity_sweep_filter: true
+    use_ob2_vwap_filter: false
+    risk_tier: "medium_quality"
+    
+  - name: "Sweep + OB2 VWAP"
+    id: "sweep_ob2vwap"
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: true
+    use_ob2_vwap_filter: true
+    risk_tier: "medium_quality"
+    
+  - name: "CVD Only"
+    id: "cvd_only"
+    use_cvd_filter: true
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    risk_tier: "base_quality"
+    
+  - name: "OB2 VWAP Only (Base Quality)"
+    id: "ob2vwap_only"
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: true
+    risk_tier: "base_quality"
+    
+  - name: "Sweep Only"
+    id: "sweep_only"
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: true
+    use_ob2_vwap_filter: false
+    risk_tier: "base_quality"
+    
+  - name: "No Filters (Core Strategy)"
+    id: "no_filters"
+    use_cvd_filter: false
+    use_liquidity_sweep_filter: false
+    use_ob2_vwap_filter: false
+    risk_tier: "base_quality"
+
+# ============================================================================
+# PROP FIRM CHALLENGE TARGETS
+# ============================================================================
+
+prop_firm_targets:
+  phase_1:
+    profit_target_percent: 8
+    max_daily_loss_percent: 5
+    max_total_drawdown_percent: 10
+    min_trading_days: 4
+    
+  phase_2:
+    profit_target_percent: 5
+    max_daily_loss_percent: 5
+    max_total_drawdown_percent: 10
+    min_trading_days: 4
+    
+  funded:
+    profit_split_percent: 80
+    max_daily_loss_percent: 5
+    max_total_drawdown_percent: 10
