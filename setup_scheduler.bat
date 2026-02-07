@@ -21,24 +21,28 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-echo Creating scheduled task...
+:: Delete existing task if exists
+schtasks /delete /tn "ICT Trading Bot" /f >nul 2>&1
 
-schtasks /create ^
-    /tn "ICT Trading Bot" ^
-    /tr "C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\.venv\Scripts\pythonw.exe C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\backtest_engine\run_live.py" ^
-    /sc weekly ^
-    /d MON,TUE,WED,THU,FRI ^
-    /st 03:30 ^
-    /rl highest ^
-    /f
+echo Creating scheduled task with optimized settings...
+echo.
+
+:: Use XML for advanced settings
+schtasks /create /tn "ICT Trading Bot" /xml "C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\backtest_engine\ICT_Trading_Task.xml" /f
 
 if %errorLevel% equ 0 (
     echo.
     echo ================================================
-    echo    SUCCESS! Task created.
+    echo    SUCCESS! Task created with these settings:
     echo ================================================
     echo.
-    echo The trading bot will start at 3:30 AM (Mon-Fri only).
+    echo    [x] Runs Mon-Fri at 3:30 AM
+    echo    [x] Works on battery power
+    echo    [x] Wakes PC from sleep
+    echo    [x] No time limit (runs all day)
+    echo    [x] Auto-restart on failure (3 attempts)
+    echo    [x] Starts if missed (PC was off)
+    echo    [x] Uses visible console (python.exe)
     echo.
     echo To start NOW, run:
     echo    schtasks /run /tn "ICT Trading Bot"
