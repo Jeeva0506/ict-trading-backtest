@@ -25,7 +25,7 @@ echo Creating scheduled task...
 
 schtasks /create ^
     /tn "ICT Trading Bot" ^
-    /tr "C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\.venv\Scripts\pythonw.exe C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\backtest_engine\trading_scheduler.py" ^
+    /tr "C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\.venv\Scripts\pythonw.exe C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\backtest_engine\run_live.py" ^
     /sc weekly ^
     /d MON,TUE,WED,THU,FRI ^
     /st 03:30 ^
