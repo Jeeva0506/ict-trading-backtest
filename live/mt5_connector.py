@@ -1152,6 +1152,79 @@ class LiveTrader:
         
         return False
     
+    def close_positions_before_market_close(self):
+        """
+        Close all open positions 15 minutes before their market close time.
+        This prevents overnight exposure and gap risk.
+        """
+        positions = self.mt5.get_open_positions()
+        if not positions:
+            return
+        
+        for pos in positions:
+            symbol = pos['symbol']
+            ticket = pos['ticket']
+            
+            # Get symbol config
+            if symbol not in PROFITABLE_INDICES:
+                continue
+            
+            config = PROFITABLE_INDICES[symbol]
+            
+            # Get current time in symbol's timezone
+            try:
+                import pytz
+                tz = pytz.timezone(config['timezone'])
+                now = datetime.now(tz)
+                current_time = now.time()
+                
+                # Force close time (15 mins before market close)
+                from datetime import time as dt_time
+                force_close_time = dt_time(config['force_close_hour'], config['force_close_minute'])
+                market_close_time = dt_time(config['market_close_hour'], config['market_close_minute'])
+                
+                # Check if we're in the force close window (between force_close and market_close)
+                if force_close_time <= current_time < market_close_time:
+                    # Close this position
+                    pnl = pos.get('profit', 0)
+                    logger.info(f"FORCE CLOSE: Closing {symbol} position {ticket} before market close (P&L: ${pnl:.2f})")
+                    
+                    success = self.mt5.close_position(ticket)
+                    
+                    if success:
+                        # Update journal if tracked
+                        if ticket in self.state.open_positions:
+                            signal = self.state.open_positions.pop(ticket)
+                            
+                            if ticket in self.trade_id_map:
+                                account = self.mt5.get_account_info()
+                                dd_status = self.dd_protection.update(account['balance'])
+                                self.journal.close_trade(self.trade_id_map[ticket], {
+                                    'exit_price': pos.get('price_current', 0),
+                                    'exit_reason': 'MARKET_CLOSE',
+                                    'pnl': pnl,
+                                    'pnl_percent': (pnl / signal.get('risk_amount', 1)) * 100 if signal.get('risk_amount') else 0,
+                                    'balance_after': account['balance'],
+                                    'drawdown': dd_status['overall_dd']
+                                })
+                        
+                        self.state.daily_pnl += pnl
+                        
+                        # Send Telegram notification
+                        self.telegram.send_message(
+                            f"🌙 <b>MARKET CLOSE - Position Closed</b>\n\n"
+                            f"Symbol: {symbol}\n"
+                            f"P&L: ${pnl:+.2f}\n"
+                            f"Reason: Closing before {config['market_close_hour']}:{config['market_close_minute']:02d} market close\n\n"
+                            f"No overnight positions held."
+                        )
+                        logger.info(f"Position {ticket} closed before market close")
+                    else:
+                        logger.error(f"Failed to force close position {ticket}")
+                        
+            except Exception as e:
+                logger.error(f"Error checking market close for {symbol}: {e}")
+    
     def manage_positions(self):
         """
         Manage open positions with full TP ladder:
@@ -1450,6 +1523,12 @@ class LiveTrader:
                         logger.error(f"Error processing {symbol}: {symbol_error}")
                         # Continue with other symbols
                         continue
+                
+                # ====== Close positions before market close (no overnight exposure) ======
+                try:
+                    self.close_positions_before_market_close()
+                except Exception as close_error:
+                    logger.error(f"Error in market close check: {close_error}")
                 
                 # Manage existing positions
                 try:

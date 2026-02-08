@@ -78,8 +78,11 @@ STEP 7: DAILY OPERATIONS
 
 STEP 8: END OF DAY
 ------------------
-  • System continues running (no forced close)
-  • Open positions carry overnight if not closed
+  • All open positions auto-closed 15 minutes before market close
+  • Force close times (local market time):
+    - SPX500/US30: 3:45 PM ET (closes 4:00 PM)
+    - GER30/FRA40: 5:15 PM CET (closes 5:30 PM)
+  • No overnight positions held - prevents gap risk
   • Trade journal updated with daily summary
 
 
@@ -190,6 +193,7 @@ ANTI-FLAG RATING: 10/10
   ✓ Mix of wins and losses (68.8% not suspiciously high)
   ✓ Variable trade sizes (based on balance fluctuation)
   ✓ Trading during normal market hours
+  ✓ No overnight positions (closes 15 min before market end)
 
   NO RED FLAGS:
   ✗ No martingale or doubling down

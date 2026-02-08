@@ -240,7 +240,7 @@ def run_backtest():
     
     # Risk Management
     CAPITAL = 100000.0
-    RISK_PERCENT = 1.0
+    RISK_PERCENT = 1.5
     SYMBOL = 'SPX500'
     
     print(f"\n💰 Risk Management:")
