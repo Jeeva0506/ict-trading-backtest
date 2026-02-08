@@ -39,6 +39,7 @@ from config_fundednext import (
 )
 from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
+from telegram_commands import TelegramCommandHandler
 from trade_journal import TradeJournal, ReportScheduler
 
 # Setup logging
@@ -461,6 +462,14 @@ class LiveTrader:
         self.heartbeat_file = Path(__file__).parent / 'logs' / 'heartbeat.txt'
         self._shutdown_requested = False
         
+        # Trading control state (for Telegram commands)
+        self._trading_enabled = True  # Can be paused/resumed via Telegram
+        self._trading_paused = False  # Paused but still running
+        
+        # Telegram command handler for remote control
+        self.cmd_handler = TelegramCommandHandler(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        self._setup_command_callbacks()
+        
         # Setup graceful shutdown handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -475,12 +484,82 @@ class LiveTrader:
         """Cleanup on exit"""
         logger.info("Cleaning up...")
         try:
+            # Stop command handler
+            if hasattr(self, 'cmd_handler'):
+                self.cmd_handler.stop_polling()
+            
             account = self.mt5.get_account_info()
             if account:
                 self.telegram.bot_stopped("Graceful shutdown", account.get('balance', 0), self.state.daily_pnl)
         except:
             pass
         self.mt5.disconnect()
+    
+    def _setup_command_callbacks(self):
+        """Setup callbacks for Telegram command handler"""
+        # Start command - enable trading (resume from stop)
+        def on_start():
+            self._trading_enabled = True
+            self._trading_paused = False
+            logger.info("Trading STARTED via Telegram command")
+        
+        # Stop command - now just pauses trading (bot keeps running)
+        # Use on_pause for /stop so bot stays alive
+        def on_stop():
+            self._trading_enabled = False
+            self._shutdown_requested = True
+            logger.info("Bot SHUTDOWN requested via Telegram command")
+        
+        # Pause command - pause new trades but keep bot running
+        def on_pause():
+            self._trading_paused = True
+            logger.info("Trading PAUSED via Telegram command")
+        
+        # Resume command - resume trading
+        def on_resume():
+            self._trading_paused = False
+            logger.info("Trading RESUMED via Telegram command")
+        
+        # Status callback - return current bot status
+        def on_status():
+            account = self.mt5.get_account_info()
+            dd_status = self.dd_protection.update(account['balance']) if self.dd_protection else {}
+            active = get_active_indices()
+            positions = self.mt5.get_open_positions()
+            
+            return {
+                'balance': account.get('balance', 0),
+                'daily_pnl': self.state.daily_pnl,
+                'open_positions': len(positions),
+                'daily_dd': dd_status.get('daily_dd', 0),
+                'overall_dd': dd_status.get('overall_dd', 0),
+                'active_markets': active
+            }
+        
+        # Positions callback - return open positions
+        def on_positions():
+            positions = self.mt5.get_open_positions()
+            return [{
+                'symbol': p.symbol,
+                'type': 'BUY' if p.type == 0 else 'SELL',
+                'volume': p.volume,
+                'profit': p.profit,
+                'price_open': p.price_open,
+                'price_current': p.price_current
+            } for p in positions]
+        
+        # Balance callback - return account info
+        def on_balance():
+            return self.mt5.get_account_info()
+        
+        # Register callbacks
+        self.cmd_handler.on_start = on_start
+        self.cmd_handler.on_stop = on_stop
+        self.cmd_handler.on_pause = on_pause
+        self.cmd_handler.on_resume = on_resume
+        self.cmd_handler.on_status = on_status
+        self.cmd_handler.on_positions = on_positions
+        self.cmd_handler.on_balance = on_balance
     
     def _write_heartbeat(self):
         """Write heartbeat file for watchdog monitoring"""
@@ -513,6 +592,11 @@ class LiveTrader:
         
         logger.info(f"LiveTrader initialized - Account Size: ${initial_balance:,.2f}")
         logger.info(f"Risk per trade: {FUNDEDNEXT_RULES['risk_per_trade_percent']}% = ${initial_balance * FUNDEDNEXT_RULES['risk_per_trade_percent'] / 100:,.2f}")
+        
+        # Start Telegram command handler for remote control
+        self.cmd_handler.bot_state['is_running'] = True
+        self.cmd_handler.start_polling()
+        logger.info("Telegram command handler started - use /help for commands")
         
         # Send Telegram notification
         self.telegram.bot_started(list(PROFITABLE_INDICES.keys()), initial_balance)
@@ -634,6 +718,14 @@ class LiveTrader:
         Returns:
             (can_trade: bool, reason: str)
         """
+        # Check if trading is paused via Telegram command
+        if self._trading_paused:
+            return False, "Trading paused via Telegram"
+        
+        # Check if trading is disabled
+        if not self._trading_enabled:
+            return False, "Trading disabled"
+        
         # Check drawdown protection
         account = self.mt5.get_account_info()
         dd_status = self.dd_protection.update(account['balance'])
