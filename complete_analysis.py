@@ -75,6 +75,18 @@ INDEX_CONFIG = {
         'sl_buffer': 2.5,
         'name': 'Hang Seng'
     },
+    'US30': {
+        'local_file': 'US30_M1.csv',
+        'mt5_symbol': 'US30',
+        'session_start_hour': 16,  # US session same as SPX500
+        'session_start_minute': 30,
+        'sl_buffer': 5.0,  # Dow has larger point movements
+        'name': 'Dow Jones 30'
+    },
+    # Excluded indices (underperformers with discount/premium filter):
+    # - JP225: 0 trades passed filter
+    # - UK100: PF=0, net loss -$1,738
+    # - NDX100: Only 2 trades (limited data)
 }
 
 

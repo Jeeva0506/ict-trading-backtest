@@ -167,6 +167,34 @@ PROFITABLE_INDICES = {
         
         'timezone': 'Asia/Hong_Kong',
     },
+    
+    'US30': {
+        'symbol': 'US30',
+        'description': 'Dow Jones 30 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'USD',
+        'point_value': 1.0,
+        'sl_buffer': 5.0,           # Dow has larger point movements
+        'min_sl_distance': 5.0,
+        'max_sl_distance': 50.0,
+        
+        'market_open_hour': 9,
+        'market_open_minute': 30,
+        'market_close_hour': 16,
+        'market_close_minute': 0,
+        'force_close_hour': 15,
+        'force_close_minute': 45,
+        
+        # MT5 Time (EET/EEST - same as SPX500)
+        'mt5_open_hour': 16,
+        'mt5_open_minute': 30,
+        'mt5_close_hour': 23,
+        'mt5_close_minute': 0,
+        
+        'timezone': 'America/New_York',
+    },
 }
 
 # ============================================================================

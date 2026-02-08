@@ -78,6 +78,7 @@ class StrategyICTClean:
     - Session Filter: Only SPX market hours (9:30 AM - 4:00 PM ET)
     - Min SL Distance: 5 points (avoid tiny SL)
     - Max SL Distance: 15 points (avoid overextended entries)
+    - Discount/Premium Zone: LONGS in discount (lower 50%), SHORTS in premium (upper 50%)
     """
     
     # SPX Market Hours (US Eastern)
@@ -103,6 +104,7 @@ class StrategyICTClean:
         session_start_minute: int = 30,
         use_session_filter: bool = True,
         use_sl_distance_filter: bool = True,
+        use_discount_premium_filter: bool = True,
         min_sl_distance: float = None,
         max_sl_distance: float = None,
         market_open_hour: int = None,
@@ -124,6 +126,7 @@ class StrategyICTClean:
         self.session_start_minute = session_start_minute
         self.use_session_filter = use_session_filter
         self.use_sl_distance_filter = use_sl_distance_filter
+        self.use_discount_premium_filter = use_discount_premium_filter
         # Allow overriding SL distance limits
         if min_sl_distance is not None:
             self.MIN_SL_DISTANCE = min_sl_distance
@@ -998,6 +1001,38 @@ class StrategyICTClean:
                                 print(f"   📏 FILTERED: SL distance {risk_points:.1f} > max {self.MAX_SL_DISTANCE}")
                             self.waiting_for_entry = False
                             continue
+                    
+                    # FILTER 3: Discount/Premium Zone Filter
+                    # BULLISH: Entry must be in discount zone (lower 50% of day range)
+                    # BEARISH: Entry must be in premium zone (upper 50% of day range)
+                    if self.use_discount_premium_filter and day_high is not None and day_low is not None:
+                        day_range = day_high - day_low
+                        if day_range > 0:
+                            # Calculate 50% level (equilibrium)
+                            equilibrium = day_low + (day_range * 0.5)
+                            
+                            if self.confirmed_trend == 'bullish':
+                                # For LONGS: Entry should be BELOW equilibrium (discount zone)
+                                if entry_price > equilibrium:
+                                    if debug:
+                                        print(f"   💰 FILTERED: LONG entry {entry_price:.2f} > equilibrium {equilibrium:.2f} (not in discount zone)")
+                                        print(f"      Day Range: {day_low:.2f} - {day_high:.2f}, Entry should be < {equilibrium:.2f}")
+                                    self.waiting_for_entry = False
+                                    continue
+                                else:
+                                    if debug:
+                                        print(f"   ✅ DISCOUNT ZONE: LONG entry {entry_price:.2f} < equilibrium {equilibrium:.2f}")
+                            else:
+                                # For SHORTS: Entry should be ABOVE equilibrium (premium zone)
+                                if entry_price < equilibrium:
+                                    if debug:
+                                        print(f"   💰 FILTERED: SHORT entry {entry_price:.2f} < equilibrium {equilibrium:.2f} (not in premium zone)")
+                                        print(f"      Day Range: {day_low:.2f} - {day_high:.2f}, Entry should be > {equilibrium:.2f}")
+                                    self.waiting_for_entry = False
+                                    continue
+                                else:
+                                    if debug:
+                                        print(f"   ✅ PREMIUM ZONE: SHORT entry {entry_price:.2f} > equilibrium {equilibrium:.2f}")
                     
                     # Create signal
                     signal = TradeSignalICT(
