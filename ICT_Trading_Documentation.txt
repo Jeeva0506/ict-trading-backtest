@@ -20,10 +20,10 @@ STEP 2: MARKET ANALYSIS (Per Index)
 -----------------------------------
 For each symbol (SPX500, GER30, FRA40, US30):
 
-  a) HIGHER TIMEFRAME ANALYSIS (1H Chart)
-     • Identify market structure (bullish/bearish bias)
-     • Mark key swing highs and swing lows
-     • Determine overall trend direction
+  a) STRUCTURE ANALYSIS (1M Chart with 5-candle lookback)
+     • Identify swing highs/lows (~10 minute swings)
+     • 2x BOS in same direction confirms trend
+     • All analysis done on 1-minute candles
 
   b) LIQUIDITY SWEEP DETECTION
      • Monitor for price sweeping above previous swing high (sell setup)
