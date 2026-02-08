@@ -511,9 +511,34 @@ class LiveTrader:
         """Handle shutdown signals gracefully"""
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         self._shutdown_requested = True
+        
+        # Send Telegram notification immediately on signal (don't wait for atexit)
+        try:
+            self._save_position_state()
+            
+            # Stop command handler
+            if hasattr(self, 'cmd_handler'):
+                self.cmd_handler.stop_polling()
+            
+            account = self.mt5.get_account_info()
+            if account:
+                self.telegram.bot_stopped("Manual shutdown (Ctrl+C)", account.get('balance', 0), self.state.daily_pnl)
+                time.sleep(1)  # Wait for message to be sent
+            
+            self.mt5.disconnect()
+            logger.info("Shutdown complete. Exiting...")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        
+        # Exit cleanly
+        import sys
+        sys.exit(0)
     
     def _cleanup(self):
-        """Cleanup on exit"""
+        """Cleanup on exit (fallback if signal handler didn't run)"""
+        if self._shutdown_requested:
+            return  # Already handled by signal handler
+            
         logger.info("Cleaning up...")
         try:
             # Save state before exit
