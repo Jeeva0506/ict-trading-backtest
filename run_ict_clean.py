@@ -3,6 +3,7 @@ Run Clean ICT Strategy on SPX500
 =================================
 
 Parallel execution across all trading days
+Uses broker point values for accurate P&L calculation
 """
 
 import pandas as pd
@@ -16,14 +17,78 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from strategy.strategy_ict_clean import StrategyICTClean, TradeSignalICT
 
+# Broker point values ($ per 1 full index point per 1 lot)
+# These are fetched from MT5 using order_calc_profit()
+BROKER_POINT_VALUES = {
+    'SPX500': 10.0,      # $10 per point per lot
+    'GER30': 11.81,      # EUR converted to USD
+    'FRA40': 11.81,      # EUR converted to USD
+    'HK50': 1.29,        # HKD converted to USD
+    'UK100': 10.0,       # GBP converted to USD (approx)
+    'JP225': 0.08,       # JPY converted to USD (approx)
+    'NDX100': 10.0,      # Same as SPX500
+    'US30': 10.0,        # Same as SPX500
+}
+
+# Broker margin per lot (for 90% limit check)
+BROKER_MARGIN_PER_LOT = {
+    'SPX500': 3461,
+    'GER30': 14644,
+    'FRA40': 4906,
+    'HK50': 1739,
+    'UK100': 5000,
+    'JP225': 2000,
+    'NDX100': 4000,
+    'US30': 3500,
+}
+
 
 def get_trading_days(df: pd.DataFrame) -> list:
     """Get all unique trading days"""
     return sorted(set(df.index.date))
 
 
-def calculate_trade_pnl(signal: TradeSignalICT) -> dict:
-    """Calculate P&L for a trade"""
+def calculate_trade_pnl(signal: TradeSignalICT, symbol: str = 'SPX500', 
+                        capital: float = 100000, risk_percent: float = 1.0) -> dict:
+    """
+    Calculate P&L for a trade using broker point values
+    
+    Uses actual broker point values and calculates lots based on:
+    - Risk amount = capital * risk_percent / 100
+    - Lots = risk_amount / (sl_points * point_value_per_lot)
+    - P&L = pnl_points * lots * point_value_per_lot
+    """
+    # Get broker point value for this symbol
+    point_value = BROKER_POINT_VALUES.get(symbol, 10.0)
+    margin_per_lot = BROKER_MARGIN_PER_LOT.get(symbol, 3500)
+    
+    # Calculate position sizing
+    risk_amount = capital * (risk_percent / 100)
+    risk_points = signal.risk_points
+    
+    if risk_points > 0:
+        # Lots needed to risk exactly risk_amount
+        lots = risk_amount / (risk_points * point_value)
+        
+        # Apply broker limits (0.01 to 40.0, step 0.01)
+        lots = max(0.01, min(40.0, lots))
+        lots = int(lots * 100) / 100  # Round to 0.01
+        
+        # Check 90% margin limit
+        margin_required = lots * margin_per_lot
+        max_margin = capital * 0.90
+        if margin_required > max_margin:
+            # Reduce lots to stay within 90% margin
+            lots = max_margin / margin_per_lot
+            lots = max(0.01, int(lots * 100) / 100)
+            margin_required = lots * margin_per_lot
+    else:
+        lots = 0.01
+        margin_required = lots * margin_per_lot
+    
+    # Calculate actual risk with calculated lots
+    actual_risk = lots * risk_points * point_value
+    
     results = {
         'direction': signal.direction,
         'entry_time': str(signal.entry_time),
@@ -40,9 +105,11 @@ def calculate_trade_pnl(signal: TradeSignalICT) -> dict:
         'sl_hit': signal.sl_hit,
         'sl_moved_to_be': signal.sl_moved_to_be,
         'remaining_position': signal.position_size,
-        'risk_points': signal.risk_points,
-        'risk_amount': signal.risk_amount,
-        'dollar_per_point': signal.dollar_per_point,
+        'risk_points': risk_points,
+        'risk_amount': actual_risk,
+        'lots': lots,
+        'point_value': point_value,
+        'margin_required': margin_required,
         'ob1_zone': str(signal.ob1_zone),
         'ob2_zone': str(signal.ob2_zone),
         'ob2_extended': str(signal.ob2_extended_zone),
@@ -51,7 +118,6 @@ def calculate_trade_pnl(signal: TradeSignalICT) -> dict:
         'sweep_level': signal.sweep_level
     }
     
-    risk = signal.risk_points
     pnl_points = signal.pnl_points
     
     # If trade didn't complete, calculate based on state
@@ -60,18 +126,20 @@ def calculate_trade_pnl(signal: TradeSignalICT) -> dict:
         pnl_points = 0
     elif not signal.tp1_hit and not signal.sl_hit:
         # Neither TP1 nor SL hit - something wrong
-        pnl_points = -risk
+        pnl_points = -risk_points
     
     results['pnl_points'] = pnl_points
-    results['rr_achieved'] = pnl_points / risk if risk > 0 else 0
-    results['pnl_dollars'] = pnl_points * signal.dollar_per_point
+    results['rr_achieved'] = pnl_points / risk_points if risk_points > 0 else 0
+    
+    # P&L in dollars = points * lots * point_value_per_lot
+    results['pnl_dollars'] = pnl_points * lots * point_value
     
     return results
 
 
 def process_day_batch(args):
     """Process a batch of trading days"""
-    batch_id, days_batch, data_path, capital, risk_percent = args
+    batch_id, days_batch, data_path, capital, risk_percent, symbol = args
     
     # Load data
     df = pd.read_csv(data_path, sep='\t', parse_dates=['Time'])
@@ -140,8 +208,9 @@ def process_day_batch(args):
         )
         
         for signal in signals:
-            trade_result = calculate_trade_pnl(signal)
+            trade_result = calculate_trade_pnl(signal, symbol=symbol, capital=capital, risk_percent=risk_percent)
             trade_result['date'] = str(day)
+            trade_result['symbol'] = symbol
             trade_result['batch_id'] = batch_id
             results.append(trade_result)
     
@@ -172,10 +241,13 @@ def run_backtest():
     # Risk Management
     CAPITAL = 100000.0
     RISK_PERCENT = 1.0
+    SYMBOL = 'SPX500'
     
     print(f"\n💰 Risk Management:")
     print(f"   Capital: ${CAPITAL:,.0f}")
     print(f"   Risk per trade: {RISK_PERCENT}% (${CAPITAL * RISK_PERCENT / 100:,.0f})")
+    print(f"   Point Value: ${BROKER_POINT_VALUES.get(SYMBOL, 10)}/point/lot")
+    print(f"   Margin/Lot: ${BROKER_MARGIN_PER_LOT.get(SYMBOL, 3500):,}")
     print(f"   SL Buffer: 1 point")
     print(f"   BOS Required: 2 (trend confirmation)")
     print(f"   Filter: BOS Liquidity Sweep only")
@@ -190,7 +262,7 @@ def run_backtest():
         end_idx = min((i + 1) * batch_size, len(trading_days))
         if start_idx < len(trading_days):
             batch_days = trading_days[start_idx:end_idx]
-            batches.append((i, batch_days, str(data_path), CAPITAL, RISK_PERCENT))
+            batches.append((i, batch_days, str(data_path), CAPITAL, RISK_PERCENT, SYMBOL))
     
     print(f"\n🚀 Starting {len(batches)} parallel workers...")
     

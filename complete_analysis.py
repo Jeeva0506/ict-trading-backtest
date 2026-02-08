@@ -16,6 +16,31 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from strategy.strategy_ict_clean import StrategyICTClean
 
+# Broker point values ($ per 1 full index point per 1 lot)
+# These are fetched from MT5 using order_calc_profit()
+BROKER_POINT_VALUES = {
+    'SPX500': 10.0,      # $10 per point per lot
+    'GER30': 11.81,      # EUR converted to USD
+    'FRA40': 11.81,      # EUR converted to USD
+    'HK50': 1.29,        # HKD converted to USD
+    'UK100': 10.0,       # GBP converted to USD (approx)
+    'JP225': 0.08,       # JPY converted to USD (approx)
+    'NDX100': 10.0,      # Same as SPX500
+    'US30': 10.0,        # Same as SPX500
+}
+
+# Broker margin per lot (for 90% limit check)
+BROKER_MARGIN_PER_LOT = {
+    'SPX500': 3461,
+    'GER30': 14644,
+    'FRA40': 4906,
+    'HK50': 1739,
+    'UK100': 5000,
+    'JP225': 2000,
+    'NDX100': 4000,
+    'US30': 3500,
+}
+
 # Index configurations
 INDEX_CONFIG = {
     'SPX500': {
@@ -82,10 +107,14 @@ def download_mt5_data(symbol: str, days: int = 60) -> pd.DataFrame:
     return df
 
 
-def run_strategy(df: pd.DataFrame, config: dict) -> list:
-    """Run ICT strategy with correct settings"""
+def run_strategy(df: pd.DataFrame, config: dict, symbol: str = 'SPX500') -> list:
+    """Run ICT strategy with broker point values for accurate P&L"""
     CAPITAL = 100000.0
     RISK_PERCENT = 1.0
+    
+    # Get broker point value for this symbol
+    point_value = BROKER_POINT_VALUES.get(symbol, 10.0)
+    margin_per_lot = BROKER_MARGIN_PER_LOT.get(symbol, 3500)
     
     trading_days = sorted(set(df.index.date))
     all_trades = []
@@ -147,6 +176,29 @@ def run_strategy(df: pd.DataFrame, config: dict) -> list:
         )
         
         for signal in signals:
+            # Calculate P&L using broker point values
+            risk_amount = CAPITAL * (RISK_PERCENT / 100)
+            risk_points = signal.risk_points
+            
+            if risk_points > 0:
+                # Lots needed to risk exactly risk_amount
+                lots = risk_amount / (risk_points * point_value)
+                lots = max(0.01, min(40.0, lots))
+                lots = int(lots * 100) / 100  # Round to 0.01
+                
+                # Check 90% margin limit
+                margin_required = lots * margin_per_lot
+                max_margin = CAPITAL * 0.90
+                if margin_required > max_margin:
+                    lots = max_margin / margin_per_lot
+                    lots = int(lots * 100) / 100
+            else:
+                lots = 0.01
+            
+            # Calculate actual P&L
+            pnl_points = signal.pnl_points
+            calculated_pnl = pnl_points * lots * point_value
+            
             all_trades.append({
                 'date': day,
                 'entry_time': signal.entry_time,
@@ -154,7 +206,9 @@ def run_strategy(df: pd.DataFrame, config: dict) -> list:
                 'entry_price': signal.entry_price,
                 'tp1_hit': signal.tp1_hit,
                 'sl_hit': signal.sl_hit,
-                'pnl': signal.realized_pnl,
+                'pnl': calculated_pnl,
+                'lots': lots,
+                'pnl_points': pnl_points,
                 'week': day.isocalendar()[1],
                 'month': day.strftime('%Y-%m'),
                 'weekday': day.strftime('%A')
@@ -302,8 +356,10 @@ def main():
         
         # Run backtests
         print(f"\n   🔬 Running backtests...")
-        local_trades = run_strategy(local_filtered, config)
-        mt5_trades = run_strategy(mt5_filtered, config)
+        print(f"      Point Value: ${BROKER_POINT_VALUES.get(symbol, 10.0)}/point/lot")
+        print(f"      Margin/Lot: ${BROKER_MARGIN_PER_LOT.get(symbol, 3500)}")
+        local_trades = run_strategy(local_filtered, config, symbol)
+        mt5_trades = run_strategy(mt5_filtered, config, symbol)
         
         # Compare
         if compare_data(local_trades, mt5_trades, symbol):
