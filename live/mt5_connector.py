@@ -43,6 +43,14 @@ from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
 from telegram_commands import TelegramCommandHandler
 from trade_journal import TradeJournal, ReportScheduler
+from sl_protection import (
+    set_telegram_config as sl_set_telegram,
+    start_monitoring as sl_start_monitoring,
+    stop_monitoring as sl_stop_monitoring,
+    verify_sl_after_entry,
+    is_trading_paused as sl_is_trading_paused,
+    close_all_positions as sl_close_all
+)
 
 # Setup logging
 logging.basicConfig(
@@ -336,7 +344,7 @@ class MT5Connector:
             "price": price,
             "sl": sl,
             "tp": tp,
-            "deviation": 20,
+            "deviation": 10,  # Reduced from 20 for tighter fills
             "magic": 20260208,  # Unique ID for our bot
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
@@ -359,31 +367,44 @@ class MT5Connector:
             'tp': tp
         }
     
-    def modify_position(self, ticket: int, sl: float = None, tp: float = None) -> bool:
-        """Modify SL/TP of an open position"""
-        position = mt5.positions_get(ticket=ticket)
-        if not position:
-            logger.error(f"Position {ticket} not found")
-            return False
+    def modify_position(self, ticket: int, sl: float = None, tp: float = None, max_retries: int = 3) -> bool:
+        """
+        Modify SL/TP of an open position with retry logic.
         
-        pos = position[0]
+        Args:
+            ticket: Position ticket
+            sl: New stop loss (None to keep current)
+            tp: New take profit (None to keep current)
+            max_retries: Number of retry attempts
+        """
+        for attempt in range(max_retries):
+            position = mt5.positions_get(ticket=ticket)
+            if not position:
+                logger.error(f"Position {ticket} not found")
+                return False
+            
+            pos = position[0]
+            
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": pos.symbol,
+                "position": ticket,
+                "sl": sl if sl else pos.sl,
+                "tp": tp if tp else pos.tp,
+            }
+            
+            result = mt5.order_send(request)
+            
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Position {ticket} modified - SL: {sl}, TP: {tp}")
+                return True
+            
+            logger.warning(f"Modify attempt {attempt + 1}/{max_retries} failed: {result.comment}")
+            if attempt < max_retries - 1:
+                time.sleep(0.5)  # Wait before retry
         
-        request = {
-            "action": mt5.TRADE_ACTION_SLTP,
-            "symbol": pos.symbol,
-            "position": ticket,
-            "sl": sl if sl else pos.sl,
-            "tp": tp if tp else pos.tp,
-        }
-        
-        result = mt5.order_send(request)
-        
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"Modify failed: {result.comment}")
-            return False
-        
-        logger.info(f"Position {ticket} modified - SL: {sl}, TP: {tp}")
-        return True
+        logger.error(f"Failed to modify position {ticket} after {max_retries} attempts")
+        return False
     
     def close_position(self, ticket: int, volume: float = None) -> bool:
         """Close a position (fully or partially)"""
@@ -410,7 +431,7 @@ class MT5Connector:
             "type": trade_type,
             "position": ticket,
             "price": price,
-            "deviation": 20,
+            "deviation": 10,  # Reduced from 20 for tighter fills
             "magic": 20260208,
             "comment": "Partial/Full close",
             "type_time": mt5.ORDER_TIME_GTC,
@@ -523,6 +544,9 @@ class LiveTrader:
         
         # Send Telegram notification immediately on signal (don't wait for atexit)
         try:
+            # Stop SL Protection monitoring first
+            sl_stop_monitoring()
+            
             self._save_position_state()
             
             # Stop command handler
@@ -550,6 +574,9 @@ class LiveTrader:
             
         logger.info("Cleaning up...")
         try:
+            # Stop SL Protection monitoring
+            sl_stop_monitoring()
+            
             # Save state before exit
             self._save_position_state()
             
@@ -822,6 +849,11 @@ class LiveTrader:
         # Send Telegram notification
         self.telegram.bot_started(list(PROFITABLE_INDICES.keys()), initial_balance)
         
+        # Start SL Protection monitoring
+        sl_set_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        sl_start_monitoring()
+        logger.info("SL Protection monitoring started")
+        
         return True
     
     def check_daily_reset(self):
@@ -893,6 +925,9 @@ class LiveTrader:
                     account = self.mt5.get_account_info()
                     self.telegram.mt5_reconnected(account.get('balance', 0))
                     self._mt5_down_notified = False
+                    
+                    # Verify positions after reconnect
+                    self._verify_positions_after_reconnect()
                     return True
                 time.sleep(10)
             
@@ -909,6 +944,65 @@ class LiveTrader:
             self.telegram.mt5_reconnected(account.get('balance', 0))
         
         return True
+    
+    def _verify_positions_after_reconnect(self):
+        """
+        Verify positions after MT5 reconnection.
+        Reconcile with saved state and check for closed/modified positions.
+        """
+        logger.info("Verifying positions after reconnect...")
+        
+        # Get current MT5 positions
+        mt5_positions = self.mt5.get_open_positions()
+        mt5_tickets = {pos['ticket'] for pos in mt5_positions}
+        
+        # Check for positions in our tracking that were closed while disconnected
+        orphaned_tickets = []
+        for ticket in list(self.state.open_positions.keys()):
+            if ticket not in mt5_tickets:
+                orphaned_tickets.append(ticket)
+        
+        if orphaned_tickets:
+            logger.warning(f"Positions closed while disconnected: {orphaned_tickets}")
+            for ticket in orphaned_tickets:
+                signal = self.state.open_positions.pop(ticket, None)
+                if signal:
+                    # Get trade history to find exit details
+                    history = mt5.history_deals_get(position=ticket)
+                    if history and len(history) > 0:
+                        total_pnl = sum(deal.profit for deal in history if deal.entry == 1)
+                        self.state.daily_pnl += total_pnl
+                        logger.info(f"Position {ticket} was closed while disconnected - P&L: ${total_pnl:.2f}")
+                        self.telegram.send_message(
+                            f"⚠️ <b>Position Closed While Disconnected</b>\n\n"
+                            f"Ticket: {ticket}\n"
+                            f"Symbol: {signal.get('symbol', 'Unknown')}\n"
+                            f"P&L: ${total_pnl:+.2f}"
+                        )
+        
+        # Check for positions in MT5 that we're not tracking
+        tracked_tickets = set(self.state.open_positions.keys())
+        untracked = mt5_tickets - tracked_tickets
+        if untracked:
+            logger.warning(f"Found untracked MT5 positions: {untracked}")
+            self.telegram.send_message(
+                f"⚠️ <b>Untracked Positions Found</b>\n\n"
+                f"Tickets: {list(untracked)}\n"
+                f"These positions are not managed by the bot."
+            )
+        
+        # Verify SL is set on remaining positions
+        for pos in mt5_positions:
+            if pos['ticket'] in self.state.open_positions:
+                if pos['sl'] == 0 or pos['sl'] is None:
+                    logger.critical(f"Position {pos['ticket']} has NO SL after reconnect!")
+                    self.telegram.critical_alert(
+                        "POSITION WITHOUT SL",
+                        f"Ticket: {pos['ticket']}\nSymbol: {pos['symbol']}\n\nSet SL immediately!"
+                    )
+        
+        self._save_position_state()
+        logger.info(f"Position verification complete - tracking {len(self.state.open_positions)} positions")
     
     def _check_market_notifications(self, active_indices: list):
         """Track market open/close and send notifications"""
@@ -1148,6 +1242,20 @@ class LiveTrader:
                 risk_amount=risk_amount
             )
             
+            # CRITICAL: Verify SL is properly set (failsafe)
+            sl_verified = verify_sl_after_entry(
+                ticket=result['ticket'],
+                expected_sl=signal['stop_loss'],
+                expected_tp=signal['tp1'],
+                symbol=symbol
+            )
+            
+            if not sl_verified:
+                logger.critical(f"SL verification failed for {symbol} - position emergency closed")
+                # Position was emergency closed by sl_protection, remove from tracking
+                self.state.open_positions.pop(result['ticket'], None)
+                return False
+            
             return True
         
         return False
@@ -1321,20 +1429,21 @@ class LiveTrader:
                 tp2_hit = (current >= signal['tp2']) if is_buy else (current <= signal['tp2'])
                 
                 if tp2_hit:
-                    signal['tp2_executed'] = True
                     close_volume = round(pos['volume'] * 0.5, 2)
                     
                     if close_volume >= 0.01:  # Min lot size
                         success = self.mt5.close_position(ticket, volume=close_volume)
                         if success:
+                            signal['tp2_executed'] = True  # Only mark after successful close
                             pnl_points = abs(current - entry_price)
                             estimated_pnl = pnl_points * close_volume * 10  # Approximate
                             logger.info(f"TP2 hit for {ticket} - Closed 50% ({close_volume} lots)")
                             self.telegram.tp_hit(pos['symbol'], 2, current, estimated_pnl, close_volume)
                             self._save_position_state()
                         else:
-                            logger.error(f"Failed to close 50% at TP2 for {ticket}")
+                            logger.error(f"Failed to close 50% at TP2 for {ticket} - will retry next loop")
                     else:
+                        signal['tp2_executed'] = True  # Skip if volume too small
                         logger.warning(f"TP2: Volume too small to close ({close_volume})")
             
             # ====== TP3: Close 25% (half of remaining 50%), start trailing ======
@@ -1342,8 +1451,6 @@ class LiveTrader:
                 tp3_hit = (current >= signal['tp3']) if is_buy else (current <= signal['tp3'])
                 
                 if tp3_hit:
-                    signal['tp3_executed'] = True
-                    signal['trailing_active'] = True
                     # Close half of remaining (25% of original)
                     current_volume = pos['volume']
                     close_volume = round(current_volume * 0.5, 2)
@@ -1351,6 +1458,8 @@ class LiveTrader:
                     if close_volume >= 0.01:
                         success = self.mt5.close_position(ticket, volume=close_volume)
                         if success:
+                            signal['tp3_executed'] = True  # Only mark after successful close
+                            signal['trailing_active'] = True
                             pnl_points = abs(current - entry_price)
                             estimated_pnl = pnl_points * close_volume * 10
                             logger.info(f"TP3 hit for {ticket} - Closed 25% ({close_volume} lots), trailing active")
@@ -1362,7 +1471,11 @@ class LiveTrader:
                             signal['trailing_sl'] = trail_sl
                             self._save_position_state()
                         else:
-                            logger.error(f"Failed to close 25% at TP3 for {ticket}")
+                            logger.error(f"Failed to close 25% at TP3 for {ticket} - will retry next loop")
+                    else:
+                        signal['tp3_executed'] = True  # Skip if volume too small
+                        signal['trailing_active'] = True
+                        logger.warning(f"TP3: Volume too small to close ({close_volume}), starting trailing anyway")
             
             # ====== Trailing Stop after TP3 ======
             elif signal.get('trailing_active'):
@@ -1493,6 +1606,11 @@ class LiveTrader:
                 # Check each active index for signals
                 for symbol in active_indices:
                     try:
+                        # Check if SL protection has paused trading (emergency recovery)
+                        if sl_is_trading_paused():
+                            logger.warning(f"Trading paused by SL protection - skipping signal generation")
+                            break
+                        
                         can_trade, reason = self.can_trade(symbol)
                         
                         if not can_trade:
@@ -1613,12 +1731,31 @@ class LiveTrader:
         logger.warning(f"EMERGENCY CLOSE ALL POSITIONS - Reason: {reason}")
         
         positions = self.mt5.get_open_positions()
+        failed_closes = []
+        
         for pos in positions:
-            try:
-                self.mt5.close_position(pos['ticket'])
-                logger.info(f"Emergency closed position {pos['ticket']}")
-            except Exception as e:
-                logger.error(f"Failed to close position {pos['ticket']}: {e}")
+            closed = False
+            for attempt in range(5):  # 5 retry attempts
+                try:
+                    result = self.mt5.close_position(pos['ticket'])
+                    if result:
+                        logger.info(f"Emergency closed position {pos['ticket']} on attempt {attempt + 1}")
+                        closed = True
+                        break
+                except Exception as e:
+                    logger.error(f"Emergency close attempt {attempt + 1} failed for {pos['ticket']}: {e}")
+                time.sleep(1)  # Wait between retries
+            
+            if not closed:
+                failed_closes.append(pos['ticket'])
+                logger.critical(f"FAILED to emergency close position {pos['ticket']} after 5 attempts!")
+        
+        # Alert if any positions failed to close
+        if failed_closes:
+            self.telegram.critical_alert(
+                "EMERGENCY CLOSE FAILED",
+                f"Tickets: {failed_closes}\n\n⚠️ MANUAL INTERVENTION REQUIRED!\nThese positions could not be closed automatically."
+            )
 
 
 if __name__ == '__main__':

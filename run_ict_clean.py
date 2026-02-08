@@ -42,6 +42,18 @@ BROKER_MARGIN_PER_LOT = {
     'US30': 3500,
 }
 
+# Session start times per symbol (for day high/low calculation)
+SESSION_TIMES = {
+    'SPX500': (16, 30),   # US session 4:30 PM GMT
+    'GER30': (10, 0),     # EU session 10:00 AM GMT
+    'FRA40': (10, 0),     # EU session 10:00 AM GMT
+    'HK50': (3, 30),      # HK session 3:30 AM GMT
+    'UK100': (9, 0),      # UK session 9:00 AM GMT
+    'JP225': (2, 0),      # JP session 2:00 AM GMT
+    'NDX100': (16, 30),   # US session 4:30 PM GMT
+    'US30': (16, 30),     # US session 4:30 PM GMT
+}
+
 
 def get_trading_days(df: pd.DataFrame) -> list:
     """Get all unique trading days"""
@@ -176,7 +188,8 @@ def process_day_batch(args):
             continue
         
         # Session start time (exclude premarket for day high/low calculation)
-        session_start = pd.Timestamp(day).replace(hour=16, minute=30)
+        session_hour, session_minute = SESSION_TIMES.get(symbol, (16, 30))
+        session_start = pd.Timestamp(day).replace(hour=session_hour, minute=session_minute)
         market_hours_data = current_day_data[current_day_data.index >= session_start]
         
         if len(market_hours_data) > 0:
@@ -194,8 +207,8 @@ def process_day_batch(args):
             bos_required=2,
             capital=capital,
             risk_percent=risk_percent,
-            session_start_hour=16,
-            session_start_minute=30
+            session_start_hour=session_hour,
+            session_start_minute=session_minute
         )
         
         signals = strategy.generate_signals(
