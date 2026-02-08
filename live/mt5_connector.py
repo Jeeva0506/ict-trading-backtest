@@ -484,6 +484,9 @@ class LiveTrader:
         """Cleanup on exit"""
         logger.info("Cleaning up...")
         try:
+            # Save state before exit
+            self._save_position_state()
+            
             # Stop command handler
             if hasattr(self, 'cmd_handler'):
                 self.cmd_handler.stop_polling()
@@ -494,6 +497,140 @@ class LiveTrader:
         except:
             pass
         self.mt5.disconnect()
+    
+    def _save_position_state(self):
+        """
+        Save open positions and their TP/trailing state to JSON for recovery.
+        Called after any position state change (TP hit, SL moved, partial close).
+        """
+        state_file = Path(__file__).parent / 'logs' / 'position_state.json'
+        try:
+            state_data = {
+                'timestamp': datetime.now().isoformat(),
+                'daily_pnl': self.state.daily_pnl,
+                'daily_trades': self.state.daily_trades,
+                'positions': {}
+            }
+            
+            # Save each open position's state
+            for ticket, signal in self.state.open_positions.items():
+                state_data['positions'][str(ticket)] = {
+                    'symbol': signal.get('symbol'),
+                    'direction': signal.get('direction'),
+                    'entry_price': signal.get('entry_price'),
+                    'stop_loss': signal.get('stop_loss'),
+                    'tp1': signal.get('tp1'),
+                    'tp2': signal.get('tp2'),
+                    'tp3': signal.get('tp3'),
+                    'tp_final': signal.get('tp_final'),
+                    'risk_amount': signal.get('risk_amount'),
+                    'tp1_executed': signal.get('tp1_executed', False),
+                    'tp2_executed': signal.get('tp2_executed', False),
+                    'tp3_executed': signal.get('tp3_executed', False),
+                    'trailing_active': signal.get('trailing_active', False),
+                    'trailing_sl': signal.get('trailing_sl'),
+                }
+            
+            # Also save strategy states for each symbol
+            state_data['strategies'] = {}
+            for symbol, strategy in self.strategies.items():
+                state_data['strategies'][symbol] = {
+                    'confirmed_trend': strategy.confirmed_trend,
+                    'bos_count_bullish': strategy.bos_count_bullish,
+                    'bos_count_bearish': strategy.bos_count_bearish,
+                    'sweep_occurred': strategy.sweep_occurred,
+                    'sweep_direction': strategy.sweep_direction,
+                    'sweep_level': strategy.sweep_level,
+                    'ob1_zone': strategy.ob1_zone,
+                    'ob1_touched': strategy.ob1_touched,
+                    'choch_detected': strategy.choch_detected,
+                    'choch_level': strategy.choch_level,
+                    'ob2_zone': strategy.ob2_zone,
+                    'ob2_extended_zone': strategy.ob2_extended_zone,
+                    'waiting_for_entry': strategy.waiting_for_entry,
+                    'trade_taken': strategy.trade_taken,
+                }
+            
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(state_file, 'w') as f:
+                json.dump(state_data, f, indent=2, default=str)
+            
+            logger.debug(f"Position state saved: {len(state_data['positions'])} positions")
+        except Exception as e:
+            logger.error(f"Failed to save position state: {e}")
+    
+    def _load_position_state(self):
+        """
+        Load position state from JSON after restart.
+        Syncs with actual MT5 positions to recover TP/trailing state.
+        """
+        state_file = Path(__file__).parent / 'logs' / 'position_state.json'
+        
+        if not state_file.exists():
+            logger.info("No position state file found - fresh start")
+            return
+        
+        try:
+            with open(state_file, 'r') as f:
+                state_data = json.load(f)
+            
+            # Check if state is from today
+            saved_date = state_data.get('timestamp', '')[:10]
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            if saved_date != today:
+                logger.info(f"Position state from {saved_date}, today is {today} - skipping old state")
+                return
+            
+            # Restore daily counters
+            self.state.daily_pnl = state_data.get('daily_pnl', 0)
+            self.state.daily_trades = state_data.get('daily_trades', 0)
+            
+            # Get actual MT5 positions
+            mt5_positions = self.mt5.get_open_positions()
+            mt5_tickets = {pos['ticket'] for pos in mt5_positions}
+            
+            # Restore position states that still exist in MT5
+            restored_count = 0
+            for ticket_str, pos_state in state_data.get('positions', {}).items():
+                ticket = int(ticket_str)
+                if ticket in mt5_tickets:
+                    self.state.open_positions[ticket] = pos_state
+                    restored_count += 1
+                    logger.info(f"Restored position {ticket} state: TP1={pos_state.get('tp1_executed')}, TP2={pos_state.get('tp2_executed')}, TP3={pos_state.get('tp3_executed')}")
+            
+            # Restore strategy states
+            for symbol, strat_state in state_data.get('strategies', {}).items():
+                if symbol in self.strategies:
+                    strategy = self.strategies[symbol]
+                    strategy.confirmed_trend = strat_state.get('confirmed_trend')
+                    strategy.bos_count_bullish = strat_state.get('bos_count_bullish', 0)
+                    strategy.bos_count_bearish = strat_state.get('bos_count_bearish', 0)
+                    strategy.sweep_occurred = strat_state.get('sweep_occurred', False)
+                    strategy.sweep_direction = strat_state.get('sweep_direction')
+                    strategy.sweep_level = strat_state.get('sweep_level')
+                    strategy.ob1_zone = tuple(strat_state['ob1_zone']) if strat_state.get('ob1_zone') else None
+                    strategy.ob1_touched = strat_state.get('ob1_touched', False)
+                    strategy.choch_detected = strat_state.get('choch_detected', False)
+                    strategy.choch_level = strat_state.get('choch_level')
+                    strategy.ob2_zone = tuple(strat_state['ob2_zone']) if strat_state.get('ob2_zone') else None
+                    strategy.ob2_extended_zone = tuple(strat_state['ob2_extended_zone']) if strat_state.get('ob2_extended_zone') else None
+                    strategy.waiting_for_entry = strat_state.get('waiting_for_entry', False)
+                    strategy.trade_taken = strat_state.get('trade_taken', False)
+                    logger.info(f"Restored {symbol} strategy state: trend={strategy.confirmed_trend}, OB1={strategy.ob1_zone}")
+            
+            if restored_count > 0:
+                logger.info(f"Restored {restored_count} position states from file")
+                self.telegram.send_message(
+                    f"🔄 <b>BOT RECOVERED</b>\n\n"
+                    f"Restored {restored_count} position(s)\n"
+                    f"Daily P&L: ${self.state.daily_pnl:,.2f}\n"
+                    f"Daily trades: {self.state.daily_trades}"
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to load position state: {e}")
+            # Don't crash - continue with fresh state
     
     def _setup_command_callbacks(self):
         """Setup callbacks for Telegram command handler"""
@@ -592,6 +729,24 @@ class LiveTrader:
         
         logger.info(f"LiveTrader initialized - Account Size: ${initial_balance:,.2f}")
         logger.info(f"Risk per trade: {FUNDEDNEXT_RULES['risk_per_trade_percent']}% = ${initial_balance * FUNDEDNEXT_RULES['risk_per_trade_percent'] / 100:,.2f}")
+        
+        # Initialize strategies for all symbols (needed for state restoration)
+        for symbol in PROFITABLE_INDICES:
+            config = get_index_config(symbol)
+            if config:
+                self.strategies[symbol] = StrategyICTClean(
+                    sl_buffer=config['sl_buffer'],
+                    bos_required=2,
+                    capital=initial_balance,
+                    risk_percent=FUNDEDNEXT_RULES['risk_per_trade_percent'],
+                    use_session_filter=False,
+                    use_sl_distance_filter=True,
+                    min_sl_distance=config['min_sl_distance'],
+                    max_sl_distance=config['max_sl_distance']
+                )
+        
+        # Load any saved position state (recovery after restart)
+        self._load_position_state()
         
         # Start Telegram command handler for remote control
         self.cmd_handler.bot_state['is_running'] = True
@@ -921,7 +1076,13 @@ class LiveTrader:
         return False
     
     def manage_positions(self):
-        """Manage open positions (move SL to BE at TP1, partial closes)"""
+        """
+        Manage open positions with full TP ladder:
+        - TP1 (1:1): Move SL to breakeven + 2 points (cover spread)
+        - TP2 (2:1): Close 50% of position
+        - TP3 (3:1): Close 25% (half of remaining), start trailing
+        - Trailing: Move SL to recent swing + 1 point as price extends
+        """
         positions = self.mt5.get_open_positions()
         current_tickets = {pos['ticket'] for pos in positions}
         
@@ -937,12 +1098,19 @@ class LiveTrader:
             # Get trade history to find exit details
             history = mt5.history_deals_get(position=ticket)
             if history and len(history) > 0:
+                # Sum all deals for this position (partial closes + final)
+                total_pnl = sum(deal.profit for deal in history if deal.entry == 1)  # entry=1 means exit deal
                 last_deal = history[-1]
                 exit_price = last_deal.price
-                pnl = last_deal.profit
                 
-                # Determine exit reason
-                if pnl > 0:
+                # Determine exit reason based on signal state
+                if signal.get('tp3_executed'):
+                    exit_reason = "TRAILING_SL" if total_pnl > 0 else "SL_AFTER_TP3"
+                elif signal.get('tp2_executed'):
+                    exit_reason = "SL_AFTER_TP2"
+                elif signal.get('tp1_executed'):
+                    exit_reason = "SL_CTC"  # Cost-to-cost (breakeven)
+                elif total_pnl > 0:
                     exit_reason = "TP_HIT"
                 else:
                     exit_reason = "SL_HIT"
@@ -954,16 +1122,16 @@ class LiveTrader:
                     self.journal.close_trade(self.trade_id_map[ticket], {
                         'exit_price': exit_price,
                         'exit_reason': exit_reason,
-                        'pnl': pnl,
-                        'pnl_percent': (pnl / signal.get('risk_amount', 1)) * 100 if signal.get('risk_amount') else 0,
+                        'pnl': total_pnl,
+                        'pnl_percent': (total_pnl / signal.get('risk_amount', 1)) * 100 if signal.get('risk_amount') else 0,
                         'balance_after': account['balance'],
                         'drawdown': dd_status['overall_dd']
                     })
                     # Send telegram
-                    self.telegram.trade_closed(signal['symbol'], exit_reason, pnl)
+                    self.telegram.trade_closed(signal['symbol'], exit_reason, total_pnl)
                 
-                self.state.daily_pnl += pnl
-                logger.info(f"Position {ticket} closed - {exit_reason} - P&L: ${pnl:.2f}")
+                self.state.daily_pnl += total_pnl
+                logger.info(f"Position {ticket} closed - {exit_reason} - P&L: ${total_pnl:.2f}")
         
         for pos in positions:
             ticket = pos['ticket']
@@ -973,32 +1141,117 @@ class LiveTrader:
                 continue
             
             signal = self.state.open_positions[ticket]
-            current_price = pos['price']  # This is entry price, need current
             
             bid, ask = self.mt5.get_current_price(pos['symbol'])
             current = bid if pos['type'] == 'sell' else ask
             
-            # Check if TP1 hit (for CTC - move SL to entry)
-            if pos['type'] == 'buy':
-                if current >= signal['tp1'] and pos['sl'] < signal['entry_price']:
-                    # Move SL to breakeven
+            if current is None:
+                continue
+            
+            is_buy = pos['type'] == 'buy'
+            entry_price = signal['entry_price']
+            
+            # ====== TP1: Move SL to Breakeven + 2 points ======
+            if not signal.get('tp1_executed'):
+                tp1_hit = (current >= signal['tp1']) if is_buy else (current <= signal['tp1'])
+                
+                if tp1_hit:
+                    signal['tp1_executed'] = True
                     old_sl = pos['sl']
-                    self.mt5.modify_position(ticket, sl=signal['entry_price'])
-                    logger.info(f"TP1 hit for {ticket} - SL moved to BE")
+                    # BE + 2 points to cover spread/slippage
+                    new_sl = entry_price + 2 if is_buy else entry_price - 2
+                    self.mt5.modify_position(ticket, sl=new_sl)
+                    logger.info(f"TP1 hit for {ticket} - SL moved to BE+2 ({new_sl})")
                     self.telegram.tp_hit(pos['symbol'], 1, current, 0, pos['volume'])
-                    self.telegram.sl_moved(pos['symbol'], old_sl, signal['entry_price'], "TP1 hit - moved to breakeven")
+                    self.telegram.sl_moved(pos['symbol'], old_sl, new_sl, "TP1 hit - SL to BE+2pts")
+                    self._save_position_state()
+            
+            # ====== TP2: Close 50% of position ======
+            elif not signal.get('tp2_executed'):
+                tp2_hit = (current >= signal['tp2']) if is_buy else (current <= signal['tp2'])
+                
+                if tp2_hit:
+                    signal['tp2_executed'] = True
+                    close_volume = round(pos['volume'] * 0.5, 2)
                     
-            else:  # sell
-                if current <= signal['tp1'] and pos['sl'] > signal['entry_price']:
-                    old_sl = pos['sl']
-                    self.mt5.modify_position(ticket, sl=signal['entry_price'])
-                    logger.info(f"TP1 hit for {ticket} - SL moved to BE")
-                    self.telegram.tp_hit(pos['symbol'], 1, current, 0, pos['volume'])
-                    self.telegram.sl_moved(pos['symbol'], old_sl, signal['entry_price'], "TP1 hit - moved to breakeven")
+                    if close_volume >= 0.01:  # Min lot size
+                        success = self.mt5.close_position(ticket, volume=close_volume)
+                        if success:
+                            pnl_points = abs(current - entry_price)
+                            estimated_pnl = pnl_points * close_volume * 10  # Approximate
+                            logger.info(f"TP2 hit for {ticket} - Closed 50% ({close_volume} lots)")
+                            self.telegram.tp_hit(pos['symbol'], 2, current, estimated_pnl, close_volume)
+                            self._save_position_state()
+                        else:
+                            logger.error(f"Failed to close 50% at TP2 for {ticket}")
+                    else:
+                        logger.warning(f"TP2: Volume too small to close ({close_volume})")
+            
+            # ====== TP3: Close 25% (half of remaining 50%), start trailing ======
+            elif not signal.get('tp3_executed'):
+                tp3_hit = (current >= signal['tp3']) if is_buy else (current <= signal['tp3'])
+                
+                if tp3_hit:
+                    signal['tp3_executed'] = True
+                    signal['trailing_active'] = True
+                    # Close half of remaining (25% of original)
+                    current_volume = pos['volume']
+                    close_volume = round(current_volume * 0.5, 2)
+                    
+                    if close_volume >= 0.01:
+                        success = self.mt5.close_position(ticket, volume=close_volume)
+                        if success:
+                            pnl_points = abs(current - entry_price)
+                            estimated_pnl = pnl_points * close_volume * 10
+                            logger.info(f"TP3 hit for {ticket} - Closed 25% ({close_volume} lots), trailing active")
+                            self.telegram.tp_hit(pos['symbol'], 3, current, estimated_pnl, close_volume)
+                            
+                            # Set initial trailing SL at TP2 level
+                            trail_sl = signal['tp2'] if is_buy else signal['tp2']
+                            self.mt5.modify_position(ticket, sl=trail_sl)
+                            signal['trailing_sl'] = trail_sl
+                            self._save_position_state()
+                        else:
+                            logger.error(f"Failed to close 25% at TP3 for {ticket}")
+            
+            # ====== Trailing Stop after TP3 ======
+            elif signal.get('trailing_active'):
+                # Trail SL to lock in more profits as price extends
+                # For BUY: Move SL up as price goes up
+                # For SELL: Move SL down as price goes down
+                current_sl = pos['sl']
+                
+                if is_buy:
+                    # Trail SL to (current_price - risk) but never below entry
+                    risk = signal['tp1'] - entry_price  # Original 1R distance
+                    new_trail_sl = current - risk
+                    new_trail_sl = max(new_trail_sl, entry_price + 2)  # Never below BE+2
+                    
+                    if new_trail_sl > current_sl:
+                        self.mt5.modify_position(ticket, sl=new_trail_sl)
+                        logger.info(f"Trailing SL updated for {ticket}: {current_sl} -> {new_trail_sl}")
+                        signal['trailing_sl'] = new_trail_sl
+                        self._save_position_state()
+                else:
+                    # SELL: Trail down
+                    risk = entry_price - signal['tp1']
+                    new_trail_sl = current + risk
+                    new_trail_sl = min(new_trail_sl, entry_price - 2)  # Never above BE-2
+                    
+                    if new_trail_sl < current_sl:
+                        self.mt5.modify_position(ticket, sl=new_trail_sl)
+                        logger.info(f"Trailing SL updated for {ticket}: {current_sl} -> {new_trail_sl}")
+                        signal['trailing_sl'] = new_trail_sl
+                        self._save_position_state()
     
     def run(self):
-        """Main trading loop - runs 24/7"""
+        """Main trading loop - runs 24/7 with enhanced error handling"""
         logger.info("Starting 24/7 trading loop...")
+        
+        # Error tracking for smart recovery
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        last_error_time = None
         
         while not self._shutdown_requested:
             try:
@@ -1024,8 +1277,13 @@ class LiveTrader:
                     
                 self.state.current_balance = account['balance']
                 
-                # Check drawdown status
+                # ====== CRITICAL: Drawdown Protection (Handles SL Slippage) ======
+                # This runs EVERY loop iteration to catch slippage immediately
                 dd_status = self.dd_protection.update(account['balance'])
+                
+                # Calculate actual loss including any slippage
+                actual_daily_loss = self.state.daily_start_balance - account['balance']
+                actual_daily_dd_pct = (actual_daily_loss / self.state.daily_start_balance) * 100 if self.state.daily_start_balance > 0 else 0
                 
                 # Warn at 80% of daily drawdown limit (only once per hour)
                 if dd_status['daily_dd'] >= FUNDEDNEXT_RULES['daily_drawdown_stop'] * 0.8:
@@ -1037,16 +1295,41 @@ class LiveTrader:
                         )
                         self._last_dd_warning = datetime.now()
                 
+                # CRITICAL: Check if slippage caused unexpected drawdown
+                if actual_daily_dd_pct > dd_status['daily_dd'] + 0.1:  # More than 0.1% slippage detected
+                    slippage_amount = actual_daily_loss - (self.state.daily_start_balance * dd_status['daily_dd'] / 100)
+                    logger.warning(f"SL SLIPPAGE DETECTED: Expected DD {dd_status['daily_dd']:.2f}%, Actual {actual_daily_dd_pct:.2f}%, Slippage ${slippage_amount:.2f}")
+                    self.telegram.send_message(
+                        f"⚠️ <b>SL SLIPPAGE DETECTED</b>\n\n"
+                        f"Expected DD: {dd_status['daily_dd']:.2f}%\n"
+                        f"Actual DD: {actual_daily_dd_pct:.2f}%\n"
+                        f"Slippage: ${slippage_amount:.2f}\n\n"
+                        f"Daily DD limit still protecting account."
+                    )
+                
+                # MAX DRAWDOWN BREACH - Immediate stop (handles slippage)
                 if dd_status['is_max_dd_breach']:
                     logger.critical("MAX DRAWDOWN BREACHED - STOPPING ALL TRADING")
+                    # Close all open positions immediately
+                    self._emergency_close_all_positions("MAX_DD_BREACH")
                     self.telegram.critical_alert("MAX DRAWDOWN BREACHED", 
-                        f"Drawdown: {dd_status['overall_dd']:.2f}%\nBalance: ${account['balance']:,.2f}\n\nAll trading stopped!")
+                        f"Drawdown: {dd_status['overall_dd']:.2f}%\nBalance: ${account['balance']:,.2f}\n\n⚠️ All positions closed! Trading stopped!")
                     break
                 
-                # Check daily limit
-                if dd_status['is_daily_dd_breach'] and not self.state.is_daily_limit_hit:
-                    self.state.is_daily_limit_hit = True
-                    self.telegram.daily_limit_reached(self.state.daily_trades, self.state.daily_pnl)
+                # DAILY DRAWDOWN BREACH - Stop new trades, keep managing existing (handles slippage)
+                if dd_status['is_daily_dd_breach']:
+                    if not self.state.is_daily_limit_hit:
+                        self.state.is_daily_limit_hit = True
+                        self.telegram.daily_limit_reached(self.state.daily_trades, self.state.daily_pnl)
+                        logger.warning(f"DAILY DRAWDOWN LIMIT HIT: {actual_daily_dd_pct:.2f}% (includes any slippage)")
+                    
+                    # Still manage existing positions (but no new trades)
+                    self.manage_positions()
+                    self._save_position_state()  # Save state periodically
+                    time.sleep(10)
+                    continue  # Skip signal generation
+                
+                # ====== End Drawdown Protection ======
                 
                 # Get active indices for current time
                 active_indices = get_active_indices()
@@ -1059,33 +1342,44 @@ class LiveTrader:
                 
                 # Check each active index for signals
                 for symbol in active_indices:
-                    can_trade, reason = self.can_trade(symbol)
+                    try:
+                        can_trade, reason = self.can_trade(symbol)
+                        
+                        if not can_trade:
+                            logger.debug(f"{symbol}: Cannot trade - {reason}")
+                            # Notify if blocked by news
+                            if "news" in reason.lower() and hasattr(self, '_news_blocked'):
+                                if symbol not in self._news_blocked:
+                                    self.telegram.news_blocked(symbol, reason.split(":")[-1].strip(), 30)
+                                    self._news_blocked.add(symbol)
+                            continue
+                        
+                        # Clear news block tracking when can trade again
+                        if hasattr(self, '_news_blocked') and symbol in self._news_blocked:
+                            self._news_blocked.remove(symbol)
+                        
+                        # Generate signal
+                        signal = self.generate_signal(symbol)
+                        
+                        if signal:
+                            logger.info(f"Signal generated for {symbol}: {signal['direction']}")
+                            success = self.execute_signal(signal)
+                            if success:
+                                self._save_position_state()  # Save after new trade
+                            else:
+                                self.telegram.order_failed(symbol, signal['direction'], "Execution failed")
                     
-                    if not can_trade:
-                        logger.debug(f"{symbol}: Cannot trade - {reason}")
-                        # Notify if blocked by news
-                        if "news" in reason.lower() and hasattr(self, '_news_blocked'):
-                            if symbol not in self._news_blocked:
-                                # Extract event name from reason
-                                self.telegram.news_blocked(symbol, reason.split(":")[-1].strip(), 30)
-                                self._news_blocked.add(symbol)
+                    except Exception as symbol_error:
+                        logger.error(f"Error processing {symbol}: {symbol_error}")
+                        # Continue with other symbols
                         continue
-                    
-                    # Clear news block tracking when can trade again
-                    if hasattr(self, '_news_blocked') and symbol in self._news_blocked:
-                        self._news_blocked.remove(symbol)
-                    
-                    # Generate signal
-                    signal = self.generate_signal(symbol)
-                    
-                    if signal:
-                        logger.info(f"Signal generated for {symbol}: {signal['direction']}")
-                        success = self.execute_signal(signal)
-                        if not success:
-                            self.telegram.order_failed(symbol, signal['direction'], "Execution failed")
                 
                 # Manage existing positions
-                self.manage_positions()
+                try:
+                    self.manage_positions()
+                except Exception as manage_error:
+                    logger.error(f"Error managing positions: {manage_error}")
+                    self.telegram.error_alert("Position Management Error", str(manage_error))
                 
                 # Send system status every hour
                 if datetime.now().minute == 0 and datetime.now().second < 10:
@@ -1108,22 +1402,67 @@ class LiveTrader:
                         f"Active: {active_indices}"
                     )
                 
+                # Save state periodically (every 5 min)
+                if datetime.now().minute % 5 == 0 and datetime.now().second < 10:
+                    self._save_position_state()
+                
+                # Reset error counter on successful iteration
+                consecutive_errors = 0
+                
                 # Sleep for 10 seconds between checks
                 time.sleep(10)
                 
             except KeyboardInterrupt:
                 logger.info("Shutdown requested...")
+                self._save_position_state()
                 account = self.mt5.get_account_info()
-                self.telegram.bot_stopped("User requested shutdown", account['balance'], self.state.daily_pnl)
+                if account:
+                    self.telegram.bot_stopped("User requested shutdown", account.get('balance', 0), self.state.daily_pnl)
                 break
+                
             except Exception as e:
-                logger.error(f"Error in main loop: {e}")
-                self.telegram.error_alert("Main Loop Error", str(e))
-                time.sleep(30)  # Wait before retrying
+                consecutive_errors += 1
+                logger.error(f"Error in main loop ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                
+                # Save state on error
+                try:
+                    self._save_position_state()
+                except:
+                    pass
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.critical(f"Too many consecutive errors ({consecutive_errors}), stopping bot")
+                    self.telegram.critical_alert(
+                        "BOT STOPPED - Too Many Errors",
+                        f"Error: {str(e)}\n\n{consecutive_errors} consecutive errors.\nManual intervention required!"
+                    )
+                    break
+                else:
+                    self.telegram.error_alert(f"Main Loop Error ({consecutive_errors}/{max_consecutive_errors})", str(e))
+                    # Exponential backoff: 30s, 60s, 120s, 240s, 480s
+                    wait_time = min(30 * (2 ** (consecutive_errors - 1)), 480)
+                    logger.info(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
         
         # Cleanup
+        self._save_position_state()
         self.mt5.disconnect()
         logger.info("Trading stopped")
+    
+    def _emergency_close_all_positions(self, reason: str):
+        """Emergency close all positions (used when DD limit breached)"""
+        logger.warning(f"EMERGENCY CLOSE ALL POSITIONS - Reason: {reason}")
+        
+        positions = self.mt5.get_open_positions()
+        for pos in positions:
+            try:
+                self.mt5.close_position(pos['ticket'])
+                logger.info(f"Emergency closed position {pos['ticket']}")
+            except Exception as e:
+                logger.error(f"Failed to close position {pos['ticket']}: {e}")
 
 
 if __name__ == '__main__':
