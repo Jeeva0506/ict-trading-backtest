@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # backtest_engine folder
 
 from config_fundednext import (
     FUNDEDNEXT_RULES, 
+    ADAPTIVE_RISK,
     PROFITABLE_INDICES, 
     get_index_config,
     calculate_position_size,
@@ -99,6 +100,37 @@ class DrawdownProtection:
             'is_daily_dd_breach': daily_dd >= daily_dd_stop,
             'can_trade': overall_dd < max_dd_limit and daily_dd < daily_dd_stop
         }
+    
+    def get_adaptive_risk(self, current_balance: float) -> float:
+        """
+        Get current risk percent based on drawdown (Adaptive Risk Strategy)
+        - Start with 2% risk for fast evaluation pass
+        - Switch to 1% when drawdown exceeds threshold
+        - Switch back to 2% when recovered
+        """
+        if not ADAPTIVE_RISK.get('enabled', False):
+            return FUNDEDNEXT_RULES['risk_per_trade_percent']
+        
+        # Calculate current drawdown from peak
+        if current_balance > self.peak_balance:
+            self.peak_balance = current_balance
+        
+        dd_pct = ((self.peak_balance - current_balance) / self.initial_balance) * 100
+        
+        # Get thresholds
+        dd_threshold = ADAPTIVE_RISK.get('drawdown_threshold', 3.0)
+        recovery_threshold = ADAPTIVE_RISK.get('recovery_threshold', 1.0)
+        default_risk = ADAPTIVE_RISK.get('default_risk_percent', 2.0)
+        reduced_risk = ADAPTIVE_RISK.get('reduced_risk_percent', 1.0)
+        
+        if dd_pct >= dd_threshold:
+            logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {dd_threshold}% - Using {reduced_risk}% risk")
+            return reduced_risk
+        elif dd_pct <= recovery_threshold:
+            return default_risk
+        else:
+            # In between recovery and threshold, keep default
+            return default_risk
     
     def reset_daily(self, current_balance: float):
         """Reset daily tracking (call at market open)"""
@@ -925,7 +957,7 @@ class LiveTrader:
                 sl_buffer=config['sl_buffer'],
                 bos_required=2,
                 capital=self.state.current_balance,
-                risk_percent=FUNDEDNEXT_RULES['risk_per_trade_percent'],
+                risk_percent=self.dd_protection.get_adaptive_risk(self.state.current_balance),
                 use_session_filter=False,  # We handle this externally
                 use_sl_distance_filter=True,
                 min_sl_distance=config['min_sl_distance'],
@@ -934,9 +966,11 @@ class LiveTrader:
         
         strategy = self.strategies[symbol]
         
-        # Update capital
+        # Update capital and adaptive risk
+        current_risk = self.dd_protection.get_adaptive_risk(self.state.current_balance)
         strategy.capital = self.state.current_balance
-        strategy.risk_amount = self.state.current_balance * (FUNDEDNEXT_RULES['risk_per_trade_percent'] / 100)
+        strategy.risk_percent = current_risk
+        strategy.risk_amount = self.state.current_balance * (current_risk / 100)
         
         # Get today's high/low
         today_data = df[df.index.date == datetime.now().date()]
@@ -981,12 +1015,15 @@ class LiveTrader:
         account = self.mt5.get_account_info()
         sl_points = signal['risk_points']
         
+        # Get adaptive risk based on current drawdown
+        current_risk = self.dd_protection.get_adaptive_risk(account['balance'])
+        
         # Calculate position size using LIVE BROKER DATA
         # Pass free_margin to enable 90% margin limit check
         sizing = calculate_position_size_with_broker_data(
             symbol=symbol,
             account_balance=account['balance'],
-            risk_percent=FUNDEDNEXT_RULES['risk_per_trade_percent'],
+            risk_percent=current_risk,
             sl_points=sl_points,
             free_margin=account['free_margin'],
             max_margin_percent=90.0  # Max 90% of available margin
@@ -998,6 +1035,7 @@ class LiveTrader:
         
         # Log position sizing details
         logger.info(f"Position Sizing for {symbol}:")
+        logger.info(f"  Risk Mode: {'ADAPTIVE' if current_risk != FUNDEDNEXT_RULES['risk_per_trade_percent'] else 'FIXED'} @ {current_risk}%")
         logger.info(f"  SL Distance: {sl_points} points")
         logger.info(f"  Point Value: ${sizing.get('point_value', 'N/A')}/point/lot")
         logger.info(f"  Risk Amount: ${risk_amount:.2f}")

@@ -4,7 +4,11 @@ FundedNext Stellar-2 Live Trading Configuration
 Account Rules loaded from .env file:
 - Max Drawdown: 10%
 - Daily Drawdown: 3% (Stop at 2% to be safe)
-- Risk per trade: 1%
+- Risk per trade: Adaptive (2% default, 1% in drawdown)
+
+Adaptive Risk Strategy:
+- Evaluation phase: Start 2% risk, switch to 1% at 3% DD
+- Funded account: Set ADAPTIVE_RISK['enabled'] = False for fixed 1%
 """
 import os
 from pathlib import Path
@@ -37,6 +41,19 @@ FUNDEDNEXT_RULES = {
     'risk_per_trade_percent': float(os.getenv('RISK_PER_TRADE', '1.0')),
     'max_trades_per_day': 3,
     'news_buffer_minutes': int(os.getenv('NEWS_BUFFER_MINUTES', '30')),
+}
+
+# ============================================================================
+# ADAPTIVE RISK STRATEGY (For Evaluation Phase - Fast Pass)
+# ============================================================================
+# Start with aggressive 2% risk, switch to 1% when drawdown exceeds threshold
+# Backtest Results: 60.2% return, 8.34% max DD, 8% target in ~5 trading days
+ADAPTIVE_RISK = {
+    'enabled': True,                # Set False for funded account (use fixed 1%)
+    'default_risk_percent': 2.0,    # Aggressive risk when account is healthy
+    'reduced_risk_percent': 1.0,    # Conservative risk when in drawdown
+    'drawdown_threshold': 3.0,      # Switch to reduced risk at 3% DD
+    'recovery_threshold': 1.0,      # Switch back to default when DD < 1%
 }
 
 # ============================================================================
@@ -134,39 +151,8 @@ PROFITABLE_INDICES = {
         'timezone': 'Europe/Paris',
     },
     
-    'HK50': {
-        'symbol': 'HK50',
-        'description': 'Hang Seng 50 CFD',
-        'contract_size': 10,
-        'tick_size': 1.0,
-        'tick_value': 0.01,
-        'currency': 'HKD',
-        'point_value': 1.0,
-        'sl_buffer': 2.5,           # Buffer for ~26000 index
-        'min_sl_distance': 2.0,
-        'max_sl_distance': 25.0,
-        
-        'market_open_hour': 9,
-        'market_open_minute': 30,
-        'market_close_hour': 16,
-        'market_close_minute': 0,
-        'force_close_hour': 15,
-        'force_close_minute': 50,
-        
-        # Lunch break
-        'lunch_start_hour': 12,
-        'lunch_start_minute': 0,
-        'lunch_end_hour': 13,
-        'lunch_end_minute': 0,
-        
-        # MT5 Time (HK is UTC+8, EET is UTC+2/3)
-        'mt5_open_hour': 3,         # 9:30 HKT = 3:30 EET
-        'mt5_open_minute': 30,
-        'mt5_close_hour': 10,       # 16:00 HKT = 10:00 EET
-        'mt5_close_minute': 0,
-        
-        'timezone': 'Asia/Hong_Kong',
-    },
+    # HK50 removed - negative P&L after costs in 1-year backtest (-$4,018)
+    # 'HK50': { ... },
     
     'US30': {
         'symbol': 'US30',
