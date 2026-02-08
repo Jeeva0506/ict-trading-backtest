@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>ICT Trading Bot - Automated live trading for SPX500, GER30, FRA40, HK50</Description>
+    <Description>ICT Trading Bot - Automated live trading for SPX500, GER30, FRA40, US30</Description>
   </RegistrationInfo>
   <Triggers>
     <CalendarTrigger>
-      <StartBoundary>2026-02-09T03:30:00</StartBoundary>
+      <StartBoundary>2026-02-09T12:00:00</StartBoundary>
       <Enabled>true</Enabled>
       <ScheduleByWeek>
         <DaysOfWeek>

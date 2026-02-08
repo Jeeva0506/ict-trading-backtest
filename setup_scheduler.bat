@@ -7,9 +7,9 @@ echo    ICT Trading Bot - Task Scheduler Setup
 echo ================================================
 echo.
 echo This will create a Windows Task Scheduler task to:
-echo - Start trading bot at 3:30 AM IST (Mon-Fri only)
+echo - Start trading bot at 12:00 PM IST (Mon-Fri only)
 echo - Run until 2:30 AM IST (next day)
-echo - Trade SPX500, GER30, FRA40, HK50
+echo - Trade SPX500, GER30, FRA40, US30
 echo.
 
 :: Check for admin rights
@@ -36,7 +36,7 @@ if %errorLevel% equ 0 (
     echo    SUCCESS! Task created with these settings:
     echo ================================================
     echo.
-    echo    [x] Runs Mon-Fri at 3:30 AM
+    echo    [x] Runs Mon-Fri at 12:00 PM IST
     echo    [x] Works on battery power
     echo    [x] Wakes PC from sleep
     echo    [x] No time limit (runs all day)
