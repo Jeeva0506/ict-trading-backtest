@@ -1,0 +1,261 @@
+"""
+Telegram Notifier for ICT Trading Bot
+======================================
+Sends real-time trade alerts to Telegram
+
+Setup:
+1. Create a bot: Message @BotFather on Telegram, send /newbot
+2. Copy the bot token
+3. Get your chat ID: Message @userinfobot or @get_id_bot
+4. Update config_fundednext.py with your credentials
+"""
+import requests
+import logging
+from datetime import datetime
+from typing import Optional, Dict
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramNotifier:
+    """Send trading notifications via Telegram"""
+    
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+        self.enabled = bool(bot_token and chat_id)
+        
+        if not self.enabled:
+            logger.warning("Telegram notifications disabled - missing token or chat_id")
+    
+    def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
+        """Send a message to Telegram"""
+        if not self.enabled:
+            return False
+            
+        try:
+            url = f"{self.base_url}/sendMessage"
+            payload = {
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True
+            }
+            
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(f"Telegram error: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+            return False
+    
+    # ==================== Trade Alerts ====================
+    
+    def trade_entry(self, symbol: str, direction: str, entry_price: float, 
+                    sl: float, tp1: float, tp2: float, tp3: float,
+                    lot_size: float, risk_amount: float):
+        """Notify on trade entry"""
+        emoji = "🟢" if direction.upper() == "BUY" else "🔴"
+        
+        message = f"""
+{emoji} <b>NEW TRADE - {symbol}</b>
+
+<b>Direction:</b> {direction.upper()}
+<b>Entry:</b> {entry_price:.2f}
+<b>Lot Size:</b> {lot_size}
+
+<b>Targets:</b>
+├─ TP1: {tp1:.2f}
+├─ TP2: {tp2:.2f}
+└─ TP3: {tp3:.2f}
+
+<b>Stop Loss:</b> {sl:.2f}
+<b>Risk:</b> ${risk_amount:.2f}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def tp_hit(self, symbol: str, tp_level: int, price: float, 
+               profit: float, remaining_lots: float):
+        """Notify on take profit hit"""
+        emoji = "🎯" if tp_level < 3 else "🏆"
+        
+        message = f"""
+{emoji} <b>TP{tp_level} HIT - {symbol}</b>
+
+<b>Price:</b> {price:.2f}
+<b>Profit:</b> +${profit:.2f}
+<b>Remaining:</b> {remaining_lots} lots
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def sl_hit(self, symbol: str, price: float, loss: float):
+        """Notify on stop loss hit"""
+        message = f"""
+🛑 <b>STOP LOSS - {symbol}</b>
+
+<b>Exit Price:</b> {price:.2f}
+<b>Loss:</b> -${abs(loss):.2f}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def trailing_stop_hit(self, symbol: str, price: float, profit: float):
+        """Notify on trailing stop exit"""
+        message = f"""
+🔄 <b>TRAIL STOP - {symbol}</b>
+
+<b>Exit Price:</b> {price:.2f}
+<b>Profit:</b> ${profit:+.2f}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def trade_closed(self, symbol: str, reason: str, profit: float):
+        """Notify on any trade closure"""
+        emoji = "✅" if profit >= 0 else "❌"
+        
+        message = f"""
+{emoji} <b>TRADE CLOSED - {symbol}</b>
+
+<b>Reason:</b> {reason}
+<b>P&L:</b> ${profit:+.2f}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    # ==================== Status Updates ====================
+    
+    def daily_summary(self, date: str, trades: int, wins: int, 
+                      gross_pnl: float, balance: float, drawdown: float):
+        """Send daily trading summary"""
+        win_rate = (wins / trades * 100) if trades > 0 else 0
+        emoji = "📈" if gross_pnl >= 0 else "📉"
+        
+        message = f"""
+{emoji} <b>DAILY SUMMARY - {date}</b>
+
+<b>Trades:</b> {trades}
+<b>Wins:</b> {wins} ({win_rate:.0f}%)
+<b>P&L:</b> ${gross_pnl:+.2f}
+
+<b>Balance:</b> ${balance:,.2f}
+<b>Drawdown:</b> {drawdown:.2f}%
+
+━━━━━━━━━━━━━━━━━━
+"""
+        return self.send_message(message)
+    
+    def bot_started(self, indices: list, balance: float):
+        """Notify bot startup"""
+        message = f"""
+🚀 <b>TRADING BOT STARTED</b>
+
+<b>Indices:</b> {', '.join(indices)}
+<b>Balance:</b> ${balance:,.2f}
+<b>Mode:</b> Live Trading
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def bot_stopped(self, reason: str, balance: float, daily_pnl: float):
+        """Notify bot shutdown"""
+        message = f"""
+⏹️ <b>TRADING BOT STOPPED</b>
+
+<b>Reason:</b> {reason}
+<b>Balance:</b> ${balance:,.2f}
+<b>Today's P&L:</b> ${daily_pnl:+.2f}
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def error_alert(self, error_type: str, details: str):
+        """Send error notification"""
+        message = f"""
+⚠️ <b>ERROR ALERT</b>
+
+<b>Type:</b> {error_type}
+<b>Details:</b> {details}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def drawdown_warning(self, current_dd: float, limit: float, balance: float):
+        """Warn when approaching drawdown limit"""
+        message = f"""
+🚨 <b>DRAWDOWN WARNING</b>
+
+<b>Current DD:</b> {current_dd:.2f}%
+<b>Limit:</b> {limit:.2f}%
+<b>Balance:</b> ${balance:,.2f}
+
+⚠️ Approaching maximum drawdown!
+"""
+        return self.send_message(message)
+    
+    def market_open(self, symbol: str):
+        """Notify when market opens"""
+        message = f"""
+🔔 <b>MARKET OPEN - {symbol}</b>
+
+Looking for trade setups...
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    # ==================== Test ====================
+    
+    def test_connection(self) -> bool:
+        """Test Telegram connection"""
+        message = f"""
+✅ <b>CONNECTION TEST</b>
+
+ICT Trading Bot connected successfully!
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}
+"""
+        result = self.send_message(message)
+        if result:
+            logger.info("Telegram test message sent successfully")
+        return result
+
+
+# Test the notifier
+if __name__ == "__main__":
+    from config_fundednext import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    
+    notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+    
+    if notifier.test_connection():
+        print("✅ Telegram connected!")
+    else:
+        print("❌ Telegram connection failed")
+        print("\nSetup instructions:")
+        print("1. Message @BotFather on Telegram")
+        print("2. Send /newbot and follow instructions")
+        print("3. Copy the bot token")
+        print("4. Message @userinfobot to get your chat ID")
+        print("5. Add to config_fundednext.py:")
+        print('   TELEGRAM_BOT_TOKEN = "your_bot_token"')
+        print('   TELEGRAM_CHAT_ID = "your_chat_id"')

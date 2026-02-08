@@ -29,9 +29,13 @@ from config_fundednext import (
     MT5_SERVER,
     MT5_LOGIN,
     MT5_PASSWORD,
-    ACCOUNT_SIZE
+    ACCOUNT_SIZE,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID
 )
 from strategy.strategy_ict_clean import StrategyICTClean
+from telegram_notifier import TelegramNotifier
+from trade_journal import TradeJournal, ReportScheduler
 
 # Setup logging
 logging.basicConfig(
@@ -441,6 +445,10 @@ class LiveTrader:
         self.dd_protection = None
         self.state = TradingState()
         self.strategies = {}  # Per-symbol strategy instances
+        self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        self.journal = TradeJournal()
+        self.report_scheduler = ReportScheduler(self.journal, self.telegram)
+        self.trade_id_map = {}  # Maps MT5 ticket to journal trade_id
         
     def initialize(self) -> bool:
         """Initialize the trading system"""
@@ -465,6 +473,10 @@ class LiveTrader:
         
         logger.info(f"LiveTrader initialized - Account Size: ${initial_balance:,.2f}")
         logger.info(f"Risk per trade: {FUNDEDNEXT_RULES['risk_per_trade_percent']}% = ${initial_balance * FUNDEDNEXT_RULES['risk_per_trade_percent'] / 100:,.2f}")
+        
+        # Send Telegram notification
+        self.telegram.bot_started(list(PROFITABLE_INDICES.keys()), initial_balance)
+        
         return True
     
     def check_daily_reset(self):
@@ -472,6 +484,13 @@ class LiveTrader:
         today = datetime.now().strftime('%Y-%m-%d')
         if today != self.state.last_reset_date:
             account = self.mt5.get_account_info()
+            
+            # Send previous day's report before reset
+            if self.state.last_reset_date:
+                yesterday = (datetime.now() - timedelta(days=1)).date()
+                self.journal.send_daily_report(yesterday, account['balance'])
+                self.journal.generate_dashboard(account['balance'])
+            
             self.dd_protection.reset_daily(account['balance'])
             self.state.daily_start_balance = account['balance']
             self.state.daily_pnl = 0
@@ -479,6 +498,16 @@ class LiveTrader:
             self.state.is_daily_limit_hit = False
             self.state.last_reset_date = today
             logger.info(f"Daily reset - New day starting balance: ${account['balance']:,.2f}")
+    
+    def check_scheduled_reports(self):
+        """Check and send scheduled reports (daily at 3 AM, weekly on Saturday 8 AM)"""
+        account = self.mt5.get_account_info()
+        dd_status = self.dd_protection.update(account['balance'])
+        self.report_scheduler.check_and_send_reports(
+            balance=account['balance'],
+            daily_dd=dd_status['daily_dd'],
+            overall_dd=dd_status['overall_dd']
+        )
     
     def can_trade(self, symbol: str) -> tuple:
         """
@@ -613,6 +642,35 @@ class LiveTrader:
             self.state.open_positions[result['ticket']] = signal
             self.state.daily_trades += 1
             logger.info(f"Signal executed: {order_type.upper()} {volume} {symbol}")
+            
+            # Add to trade journal
+            journal_trade_id = self.journal.add_trade({
+                'symbol': symbol,
+                'direction': order_type.upper(),
+                'entry_price': signal['entry_price'],
+                'stop_loss': signal['stop_loss'],
+                'tp1': signal['tp1'],
+                'tp2': signal['tp2'],
+                'tp3': signal['tp3'],
+                'lot_size': volume,
+                'risk_amount': risk_amount,
+                'notes': f"MT5 Ticket: {result['ticket']}"
+            })
+            self.trade_id_map[result['ticket']] = journal_trade_id
+            
+            # Send Telegram notification
+            self.telegram.trade_entry(
+                symbol=symbol,
+                direction=order_type,
+                entry_price=signal['entry_price'],
+                sl=signal['stop_loss'],
+                tp1=signal['tp1'],
+                tp2=signal['tp2'],
+                tp3=signal['tp3'],
+                lot_size=volume,
+                risk_amount=risk_amount
+            )
+            
             return True
         
         return False
@@ -620,6 +678,47 @@ class LiveTrader:
     def manage_positions(self):
         """Manage open positions (move SL to BE at TP1, partial closes)"""
         positions = self.mt5.get_open_positions()
+        current_tickets = {pos['ticket'] for pos in positions}
+        
+        # Check for closed positions (in our tracking but not in MT5 anymore)
+        closed_tickets = []
+        for ticket in list(self.state.open_positions.keys()):
+            if ticket not in current_tickets:
+                closed_tickets.append(ticket)
+        
+        # Process closed positions
+        for ticket in closed_tickets:
+            signal = self.state.open_positions.pop(ticket)
+            # Get trade history to find exit details
+            history = mt5.history_deals_get(position=ticket)
+            if history and len(history) > 0:
+                last_deal = history[-1]
+                exit_price = last_deal.price
+                pnl = last_deal.profit
+                
+                # Determine exit reason
+                if pnl > 0:
+                    exit_reason = "TP_HIT"
+                else:
+                    exit_reason = "SL_HIT"
+                
+                # Update journal
+                if ticket in self.trade_id_map:
+                    account = self.mt5.get_account_info()
+                    dd_status = self.dd_protection.update(account['balance'])
+                    self.journal.close_trade(self.trade_id_map[ticket], {
+                        'exit_price': exit_price,
+                        'exit_reason': exit_reason,
+                        'pnl': pnl,
+                        'pnl_percent': (pnl / signal.get('risk_amount', 1)) * 100 if signal.get('risk_amount') else 0,
+                        'balance_after': account['balance'],
+                        'drawdown': dd_status['overall_dd']
+                    })
+                    # Send telegram
+                    self.telegram.trade_closed(signal['symbol'], exit_reason, pnl)
+                
+                self.state.daily_pnl += pnl
+                logger.info(f"Position {ticket} closed - {exit_reason} - P&L: ${pnl:.2f}")
         
         for pos in positions:
             ticket = pos['ticket']
@@ -640,11 +739,13 @@ class LiveTrader:
                     # Move SL to breakeven
                     self.mt5.modify_position(ticket, sl=signal['entry_price'])
                     logger.info(f"TP1 hit for {ticket} - SL moved to BE")
+                    self.telegram.tp_hit(pos['symbol'], 1, current, 0, pos['volume'])
                     
             else:  # sell
                 if current <= signal['tp1'] and pos['sl'] > signal['entry_price']:
                     self.mt5.modify_position(ticket, sl=signal['entry_price'])
                     logger.info(f"TP1 hit for {ticket} - SL moved to BE")
+                    self.telegram.tp_hit(pos['symbol'], 1, current, 0, pos['volume'])
     
     def run(self):
         """Main trading loop - runs 24/7"""
@@ -655,6 +756,9 @@ class LiveTrader:
                 # Daily reset check
                 self.check_daily_reset()
                 
+                # Check for scheduled reports
+                self.check_scheduled_reports()
+                
                 # Update account info
                 account = self.mt5.get_account_info()
                 self.state.current_balance = account['balance']
@@ -662,8 +766,17 @@ class LiveTrader:
                 # Check drawdown status
                 dd_status = self.dd_protection.update(account['balance'])
                 
+                # Warn at 80% of daily drawdown limit
+                if dd_status['daily_dd'] >= FUNDEDNEXT_RULES['daily_drawdown_stop'] * 0.8:
+                    self.telegram.drawdown_warning(
+                        dd_status['daily_dd'],
+                        FUNDEDNEXT_RULES['daily_drawdown_stop'],
+                        account['balance']
+                    )
+                
                 if dd_status['is_max_dd_breach']:
                     logger.critical("MAX DRAWDOWN BREACHED - STOPPING ALL TRADING")
+                    self.telegram.bot_stopped("MAX DRAWDOWN BREACHED", account['balance'], self.state.daily_pnl)
                     break
                 
                 # Get active indices for current time
@@ -704,9 +817,12 @@ class LiveTrader:
                 
             except KeyboardInterrupt:
                 logger.info("Shutdown requested...")
+                account = self.mt5.get_account_info()
+                self.telegram.bot_stopped("User requested shutdown", account['balance'], self.state.daily_pnl)
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
+                self.telegram.error_alert("Main Loop Error", str(e))
                 time.sleep(30)  # Wait before retrying
         
         # Cleanup
