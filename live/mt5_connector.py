@@ -16,6 +16,8 @@ import requests
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List
 import sys
+import signal
+import atexit
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent))  # live folder
@@ -449,6 +451,37 @@ class LiveTrader:
         self.journal = TradeJournal()
         self.report_scheduler = ReportScheduler(self.journal, self.telegram)
         self.trade_id_map = {}  # Maps MT5 ticket to journal trade_id
+        self.heartbeat_file = Path(__file__).parent / 'logs' / 'heartbeat.txt'
+        self._shutdown_requested = False
+        
+        # Setup graceful shutdown handlers
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        atexit.register(self._cleanup)
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        self._shutdown_requested = True
+    
+    def _cleanup(self):
+        """Cleanup on exit"""
+        logger.info("Cleaning up...")
+        try:
+            account = self.mt5.get_account_info()
+            if account:
+                self.telegram.bot_stopped("Graceful shutdown", account.get('balance', 0), self.state.daily_pnl)
+        except:
+            pass
+        self.mt5.disconnect()
+    
+    def _write_heartbeat(self):
+        """Write heartbeat file for watchdog monitoring"""
+        try:
+            self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+            self.heartbeat_file.write_text(datetime.now().isoformat())
+        except Exception as e:
+            logger.warning(f"Failed to write heartbeat: {e}")
         
     def initialize(self) -> bool:
         """Initialize the trading system"""
@@ -833,8 +866,11 @@ class LiveTrader:
         """Main trading loop - runs 24/7"""
         logger.info("Starting 24/7 trading loop...")
         
-        while True:
+        while not self._shutdown_requested:
             try:
+                # Write heartbeat for watchdog
+                self._write_heartbeat()
+                
                 # Check MT5 connection health
                 if not self.check_connection():
                     continue  # Skip this iteration if reconnecting

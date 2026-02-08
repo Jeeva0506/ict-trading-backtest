@@ -18,10 +18,14 @@
         <WeeksInterval>1</WeeksInterval>
       </ScheduleByWeek>
     </CalendarTrigger>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT2M</Delay>
+    </BootTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
+      <UserId>S-1-5-18</UserId>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
