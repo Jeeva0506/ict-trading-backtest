@@ -11,7 +11,7 @@ Setup:
 """
 import requests
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 from pathlib import Path
 import sys
@@ -19,6 +19,17 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
+
+# IST Timezone (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now() -> datetime:
+    """Get current time in IST"""
+    return datetime.now(IST)
+
+def ist_time(fmt: str = '%H:%M:%S IST') -> str:
+    """Get formatted IST time string"""
+    return get_ist_now().strftime(fmt)
 
 
 class TelegramNotifier:
@@ -82,7 +93,7 @@ class TelegramNotifier:
 <b>Stop Loss:</b> {sl:.2f}
 <b>Risk:</b> ${risk_amount:.2f}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -98,7 +109,7 @@ class TelegramNotifier:
 <b>Profit:</b> +${profit:.2f}
 <b>Remaining:</b> {remaining_lots} lots
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -110,7 +121,7 @@ class TelegramNotifier:
 <b>Exit Price:</b> {price:.2f}
 <b>Loss:</b> -${abs(loss):.2f}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -122,7 +133,7 @@ class TelegramNotifier:
 <b>Exit Price:</b> {price:.2f}
 <b>Profit:</b> ${profit:+.2f}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -136,7 +147,7 @@ class TelegramNotifier:
 <b>Reason:</b> {reason}
 <b>P&L:</b> ${profit:+.2f}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -171,7 +182,7 @@ class TelegramNotifier:
 <b>Balance:</b> ${balance:,.2f}
 <b>Mode:</b> Live Trading
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}
+⏰ {ist_time('%Y-%m-%d %H:%M:%S IST')}
 """
         return self.send_message(message)
     
@@ -184,7 +195,7 @@ class TelegramNotifier:
 <b>Balance:</b> ${balance:,.2f}
 <b>Today's P&L:</b> ${daily_pnl:+.2f}
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}
+⏰ {ist_time('%Y-%m-%d %H:%M:%S IST')}
 """
         return self.send_message(message)
     
@@ -196,7 +207,7 @@ class TelegramNotifier:
 <b>Type:</b> {error_type}
 <b>Details:</b> {details}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -220,7 +231,7 @@ class TelegramNotifier:
 
 Looking for trade setups...
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -236,7 +247,7 @@ Looking for trade setups...
 
 ⚠️ Trading paused until reconnection
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -251,7 +262,7 @@ Looking for trade setups...
 
 ✅ Trading resumed
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -263,7 +274,7 @@ Looking for trade setups...
 <b>Type:</b> {connection_type}
 <b>Attempt:</b> {attempt}/{max_attempts}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -275,7 +286,7 @@ Looking for trade setups...
 No internet connectivity detected.
 Trading paused until connection restored.
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -288,7 +299,7 @@ Trading paused until connection restored.
 
 ⚠️ Cannot execute trades!
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -300,7 +311,7 @@ Trading paused until connection restored.
 <b>Balance:</b> ${account_balance:,.2f}
 ✅ Trading resumed
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -311,7 +322,7 @@ Trading paused until connection restored.
 
 {f"Next open: {next_open}" if next_open else ""}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -324,7 +335,7 @@ Trading paused until connection restored.
 <b>New SL:</b> {new_sl:.2f}
 <b>Reason:</b> {reason}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -336,7 +347,7 @@ Trading paused until connection restored.
 <b>Type:</b> {order_type}
 <b>Reason:</b> {reason}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -351,7 +362,7 @@ Trading paused until connection restored.
 
 Signal skipped due to high-impact news.
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -365,7 +376,7 @@ Signal skipped due to high-impact news.
 
 No more trades until tomorrow.
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -384,7 +395,7 @@ No more trades until tomorrow.
 <b>📍 Open Positions:</b> {open_positions}
 <b>🌍 Active Markets:</b> {markets_str}
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -399,7 +410,7 @@ No more trades until tomorrow.
 
 ⚠️ IMMEDIATE ATTENTION REQUIRED!
 
-⏰ {datetime.now().strftime('%H:%M:%S IST')}
+⏰ {ist_time()}
 """
         return self.send_message(message)
     
@@ -412,7 +423,7 @@ No more trades until tomorrow.
 
 ICT Trading Bot connected successfully!
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}
+⏰ {ist_time('%Y-%m-%d %H:%M:%S IST')}
 """
         result = self.send_message(message)
         if result:

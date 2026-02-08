@@ -415,6 +415,11 @@ def is_market_open(symbol: str) -> bool:
         return False
     
     now = datetime.now()  # Assuming MT5 server time
+    
+    # Check if it's a weekday (Monday=0, Sunday=6)
+    if now.weekday() >= 5:  # Saturday or Sunday
+        return False
+    
     current_time = now.hour * 60 + now.minute
     
     # Market hours in MT5 time
