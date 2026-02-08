@@ -224,6 +224,185 @@ Looking for trade setups...
 """
         return self.send_message(message)
     
+    # ==================== Connection & Environment Alerts ====================
+    
+    def connection_lost(self, connection_type: str, details: str = ""):
+        """Alert when connection is lost"""
+        message = f"""
+🔴 <b>CONNECTION LOST</b>
+
+<b>Type:</b> {connection_type}
+<b>Details:</b> {details if details else 'Connection interrupted'}
+
+⚠️ Trading paused until reconnection
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def connection_restored(self, connection_type: str, downtime_seconds: int = 0):
+        """Alert when connection is restored"""
+        downtime_str = f"{downtime_seconds}s" if downtime_seconds < 60 else f"{downtime_seconds//60}m {downtime_seconds%60}s"
+        message = f"""
+🟢 <b>CONNECTION RESTORED</b>
+
+<b>Type:</b> {connection_type}
+<b>Downtime:</b> {downtime_str}
+
+✅ Trading resumed
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def reconnecting(self, connection_type: str, attempt: int, max_attempts: int):
+        """Alert on reconnection attempt"""
+        message = f"""
+🔄 <b>RECONNECTING...</b>
+
+<b>Type:</b> {connection_type}
+<b>Attempt:</b> {attempt}/{max_attempts}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def internet_down(self):
+        """Alert when internet connection is down"""
+        message = f"""
+🌐 <b>INTERNET DISCONNECTED</b>
+
+No internet connectivity detected.
+Trading paused until connection restored.
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def mt5_disconnected(self, reason: str = ""):
+        """Alert when MT5 connection is lost"""
+        message = f"""
+📉 <b>MT5 DISCONNECTED</b>
+
+<b>Reason:</b> {reason if reason else 'Connection lost'}
+
+⚠️ Cannot execute trades!
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def mt5_reconnected(self, account_balance: float):
+        """Alert when MT5 connection is restored"""
+        message = f"""
+📈 <b>MT5 RECONNECTED</b>
+
+<b>Balance:</b> ${account_balance:,.2f}
+✅ Trading resumed
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def market_closed(self, symbol: str, next_open: str = ""):
+        """Notify when market closes"""
+        message = f"""
+🔕 <b>MARKET CLOSED - {symbol}</b>
+
+{f"Next open: {next_open}" if next_open else ""}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def sl_moved(self, symbol: str, old_sl: float, new_sl: float, reason: str):
+        """Notify when stop loss is moved"""
+        message = f"""
+🔄 <b>SL MODIFIED - {symbol}</b>
+
+<b>Old SL:</b> {old_sl:.2f}
+<b>New SL:</b> {new_sl:.2f}
+<b>Reason:</b> {reason}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def order_failed(self, symbol: str, order_type: str, reason: str):
+        """Alert when order execution fails"""
+        message = f"""
+❌ <b>ORDER FAILED - {symbol}</b>
+
+<b>Type:</b> {order_type}
+<b>Reason:</b> {reason}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def news_blocked(self, symbol: str, event_name: str, minutes_away: int):
+        """Alert when trade blocked due to news"""
+        message = f"""
+📰 <b>TRADE BLOCKED - NEWS</b>
+
+<b>Symbol:</b> {symbol}
+<b>Event:</b> {event_name}
+<b>Time:</b> In {minutes_away} minutes
+
+Signal skipped due to high-impact news.
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def daily_limit_reached(self, trades_today: int, daily_pnl: float):
+        """Alert when daily trade limit or loss limit reached"""
+        message = f"""
+🛑 <b>DAILY LIMIT REACHED</b>
+
+<b>Trades Today:</b> {trades_today}
+<b>Daily P&L:</b> ${daily_pnl:+,.2f}
+
+No more trades until tomorrow.
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def system_status(self, balance: float, open_positions: int, 
+                      daily_pnl: float, daily_dd: float, overall_dd: float,
+                      active_markets: list):
+        """Send periodic system status update"""
+        markets_str = ", ".join(active_markets) if active_markets else "None"
+        message = f"""
+📊 <b>SYSTEM STATUS</b>
+
+<b>💰 Balance:</b> ${balance:,.2f}
+<b>📈 Today's P&L:</b> ${daily_pnl:+,.2f}
+<b>📉 Daily DD:</b> {daily_dd:.2f}%
+<b>📉 Overall DD:</b> {overall_dd:.2f}%
+<b>📍 Open Positions:</b> {open_positions}
+<b>🌍 Active Markets:</b> {markets_str}
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
+    def critical_alert(self, title: str, message_text: str):
+        """Send critical alert that requires immediate attention"""
+        message = f"""
+🚨🚨🚨 <b>CRITICAL ALERT</b> 🚨🚨🚨
+
+<b>{title}</b>
+
+{message_text}
+
+⚠️ IMMEDIATE ATTENTION REQUIRED!
+
+⏰ {datetime.now().strftime('%H:%M:%S IST')}
+"""
+        return self.send_message(message)
+    
     # ==================== Test ====================
     
     def test_connection(self) -> bool:

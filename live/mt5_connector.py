@@ -502,12 +502,90 @@ class LiveTrader:
     def check_scheduled_reports(self):
         """Check and send scheduled reports (daily at 3 AM, weekly on Saturday 8 AM)"""
         account = self.mt5.get_account_info()
+        if not account:
+            return
         dd_status = self.dd_protection.update(account['balance'])
         self.report_scheduler.check_and_send_reports(
             balance=account['balance'],
             daily_dd=dd_status['daily_dd'],
             overall_dd=dd_status['overall_dd']
         )
+    
+    def check_connection(self) -> bool:
+        """Check MT5 connection and reconnect if needed"""
+        import socket
+        
+        # Check internet connectivity
+        try:
+            socket.create_connection(("8.8.8.8", 53), timeout=3)
+        except OSError:
+            if not hasattr(self, '_internet_down_notified') or not self._internet_down_notified:
+                self.telegram.internet_down()
+                self._internet_down_notified = True
+                self.connection_lost_time = datetime.now()
+            logger.warning("No internet connection")
+            time.sleep(30)
+            return False
+        
+        # Internet is back
+        if hasattr(self, '_internet_down_notified') and self._internet_down_notified:
+            self._internet_down_notified = False
+            downtime = (datetime.now() - self.connection_lost_time).seconds if hasattr(self, 'connection_lost_time') else 0
+            self.telegram.connection_restored("Internet", downtime)
+        
+        # Check MT5 connection
+        if not mt5.terminal_info():
+            if not hasattr(self, '_mt5_down_notified') or not self._mt5_down_notified:
+                self.telegram.mt5_disconnected("Terminal not responding")
+                self._mt5_down_notified = True
+                self.connection_lost_time = datetime.now()
+            
+            # Try to reconnect
+            logger.warning("MT5 connection lost, attempting reconnect...")
+            for attempt in range(3):
+                self.telegram.reconnecting("MT5", attempt + 1, 3)
+                if self.mt5.connect():
+                    account = self.mt5.get_account_info()
+                    self.telegram.mt5_reconnected(account.get('balance', 0))
+                    self._mt5_down_notified = False
+                    return True
+                time.sleep(10)
+            
+            logger.error("Failed to reconnect to MT5 after 3 attempts")
+            time.sleep(60)
+            return False
+        
+        # MT5 is back
+        if hasattr(self, '_mt5_down_notified') and self._mt5_down_notified:
+            self._mt5_down_notified = False
+            account = self.mt5.get_account_info()
+            downtime = (datetime.now() - self.connection_lost_time).seconds if hasattr(self, 'connection_lost_time') else 0
+            self.telegram.connection_restored("MT5", downtime)
+            self.telegram.mt5_reconnected(account.get('balance', 0))
+        
+        return True
+    
+    def _check_market_notifications(self, active_indices: list):
+        """Track market open/close and send notifications"""
+        if not hasattr(self, '_previous_active'):
+            self._previous_active = set()
+            self._news_blocked = set()
+        
+        current_active = set(active_indices)
+        
+        # Markets that just opened
+        newly_opened = current_active - self._previous_active
+        for symbol in newly_opened:
+            self.telegram.market_open(symbol)
+            logger.info(f"Market opened: {symbol}")
+        
+        # Markets that just closed
+        newly_closed = self._previous_active - current_active
+        for symbol in newly_closed:
+            self.telegram.market_closed(symbol)
+            logger.info(f"Market closed: {symbol}")
+        
+        self._previous_active = current_active
     
     def can_trade(self, symbol: str) -> tuple:
         """
@@ -737,15 +815,19 @@ class LiveTrader:
             if pos['type'] == 'buy':
                 if current >= signal['tp1'] and pos['sl'] < signal['entry_price']:
                     # Move SL to breakeven
+                    old_sl = pos['sl']
                     self.mt5.modify_position(ticket, sl=signal['entry_price'])
                     logger.info(f"TP1 hit for {ticket} - SL moved to BE")
                     self.telegram.tp_hit(pos['symbol'], 1, current, 0, pos['volume'])
+                    self.telegram.sl_moved(pos['symbol'], old_sl, signal['entry_price'], "TP1 hit - moved to breakeven")
                     
             else:  # sell
                 if current <= signal['tp1'] and pos['sl'] > signal['entry_price']:
+                    old_sl = pos['sl']
                     self.mt5.modify_position(ticket, sl=signal['entry_price'])
                     logger.info(f"TP1 hit for {ticket} - SL moved to BE")
                     self.telegram.tp_hit(pos['symbol'], 1, current, 0, pos['volume'])
+                    self.telegram.sl_moved(pos['symbol'], old_sl, signal['entry_price'], "TP1 hit - moved to breakeven")
     
     def run(self):
         """Main trading loop - runs 24/7"""
@@ -753,6 +835,10 @@ class LiveTrader:
         
         while True:
             try:
+                # Check MT5 connection health
+                if not self.check_connection():
+                    continue  # Skip this iteration if reconnecting
+                
                 # Daily reset check
                 self.check_daily_reset()
                 
@@ -761,26 +847,42 @@ class LiveTrader:
                 
                 # Update account info
                 account = self.mt5.get_account_info()
+                if not account or 'balance' not in account:
+                    logger.warning("Failed to get account info, checking connection...")
+                    self.connection_lost_time = datetime.now()
+                    continue
+                    
                 self.state.current_balance = account['balance']
                 
                 # Check drawdown status
                 dd_status = self.dd_protection.update(account['balance'])
                 
-                # Warn at 80% of daily drawdown limit
+                # Warn at 80% of daily drawdown limit (only once per hour)
                 if dd_status['daily_dd'] >= FUNDEDNEXT_RULES['daily_drawdown_stop'] * 0.8:
-                    self.telegram.drawdown_warning(
-                        dd_status['daily_dd'],
-                        FUNDEDNEXT_RULES['daily_drawdown_stop'],
-                        account['balance']
-                    )
+                    if not hasattr(self, '_last_dd_warning') or (datetime.now() - self._last_dd_warning).seconds > 3600:
+                        self.telegram.drawdown_warning(
+                            dd_status['daily_dd'],
+                            FUNDEDNEXT_RULES['daily_drawdown_stop'],
+                            account['balance']
+                        )
+                        self._last_dd_warning = datetime.now()
                 
                 if dd_status['is_max_dd_breach']:
                     logger.critical("MAX DRAWDOWN BREACHED - STOPPING ALL TRADING")
-                    self.telegram.bot_stopped("MAX DRAWDOWN BREACHED", account['balance'], self.state.daily_pnl)
+                    self.telegram.critical_alert("MAX DRAWDOWN BREACHED", 
+                        f"Drawdown: {dd_status['overall_dd']:.2f}%\nBalance: ${account['balance']:,.2f}\n\nAll trading stopped!")
                     break
+                
+                # Check daily limit
+                if dd_status['is_daily_dd_breach'] and not self.state.is_daily_limit_hit:
+                    self.state.is_daily_limit_hit = True
+                    self.telegram.daily_limit_reached(self.state.daily_trades, self.state.daily_pnl)
                 
                 # Get active indices for current time
                 active_indices = get_active_indices()
+                
+                # Track market open/close (notify once)
+                self._check_market_notifications(active_indices)
                 
                 if active_indices:
                     logger.debug(f"Active indices: {active_indices}")
@@ -791,17 +893,41 @@ class LiveTrader:
                     
                     if not can_trade:
                         logger.debug(f"{symbol}: Cannot trade - {reason}")
+                        # Notify if blocked by news
+                        if "news" in reason.lower() and hasattr(self, '_news_blocked'):
+                            if symbol not in self._news_blocked:
+                                # Extract event name from reason
+                                self.telegram.news_blocked(symbol, reason.split(":")[-1].strip(), 30)
+                                self._news_blocked.add(symbol)
                         continue
+                    
+                    # Clear news block tracking when can trade again
+                    if hasattr(self, '_news_blocked') and symbol in self._news_blocked:
+                        self._news_blocked.remove(symbol)
                     
                     # Generate signal
                     signal = self.generate_signal(symbol)
                     
                     if signal:
                         logger.info(f"Signal generated for {symbol}: {signal['direction']}")
-                        self.execute_signal(signal)
+                        success = self.execute_signal(signal)
+                        if not success:
+                            self.telegram.order_failed(symbol, signal['direction'], "Execution failed")
                 
                 # Manage existing positions
                 self.manage_positions()
+                
+                # Send system status every hour
+                if datetime.now().minute == 0 and datetime.now().second < 10:
+                    positions = self.mt5.get_open_positions()
+                    self.telegram.system_status(
+                        balance=account['balance'],
+                        open_positions=len(positions),
+                        daily_pnl=self.state.daily_pnl,
+                        daily_dd=dd_status['daily_dd'],
+                        overall_dd=dd_status['overall_dd'],
+                        active_markets=active_indices
+                    )
                 
                 # Log status every 5 minutes
                 if datetime.now().minute % 5 == 0 and datetime.now().second < 10:
