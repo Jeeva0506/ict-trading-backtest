@@ -46,12 +46,12 @@ FUNDEDNEXT_RULES = {
 # ============================================================================
 # ADAPTIVE RISK STRATEGY (For Evaluation Phase - Fast Pass)
 # ============================================================================
-# Start with aggressive 2% risk, switch to 1% when drawdown exceeds threshold
+# Start with aggressive 1.5% risk, switch to 1% when drawdown exceeds threshold
 # $6,000 Account with 8% DD limit: Use 2% DD threshold for safety
 # Backtest Results: 50.4% return, 7.2% max DD, 8% target in 5 trades
 ADAPTIVE_RISK = {
-    'enabled': True,                # Set False for funded account (use fixed 1%)
-    'default_risk_percent': 2.0,    # Aggressive risk when account is healthy
+    'enabled': True,                # Set False for funded account (use fixed 1.5%)
+    'default_risk_percent': 1.5,    # Risk when account is healthy
     'reduced_risk_percent': 1.0,    # Conservative risk when in drawdown
     'drawdown_threshold': 2.0,      # Switch to reduced risk at 2% DD (safer for 8% limit)
     'recovery_threshold': 0.5,      # Switch back to default when DD < 0.5%

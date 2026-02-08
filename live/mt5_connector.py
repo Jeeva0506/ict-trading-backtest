@@ -10,6 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 import time
+import random
 import logging
 import json
 import requests
@@ -78,16 +79,23 @@ class DrawdownProtection:
         self.initial_balance = initial_balance
         self.peak_balance = initial_balance
         self.daily_start_balance = initial_balance
+        self.daily_peak_balance = initial_balance  # Highest balance TODAY
         
     def update(self, current_balance: float) -> dict:
         """Update balances and check limits"""
-        # Update peak
+        # Update overall peak
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
         
+        # Update daily peak (highest balance reached today)
+        if current_balance > self.daily_peak_balance:
+            self.daily_peak_balance = current_balance
+        
         # Calculate drawdowns
-        overall_dd = ((self.peak_balance - current_balance) / self.peak_balance) * 100
-        daily_dd = ((self.daily_start_balance - current_balance) / self.daily_start_balance) * 100
+        # Overall DD from overall peak (for max DD rule)
+        overall_dd = ((self.initial_balance - current_balance) / self.initial_balance) * 100
+        # Daily DD from TODAY's peak (for daily DD rule - FundedNext rule)
+        daily_dd = ((self.daily_peak_balance - current_balance) / self.daily_peak_balance) * 100
         
         # Check limits
         max_dd_limit = FUNDEDNEXT_RULES['max_drawdown_percent']
@@ -135,6 +143,7 @@ class DrawdownProtection:
     def reset_daily(self, current_balance: float):
         """Reset daily tracking (call at market open)"""
         self.daily_start_balance = current_balance
+        self.daily_peak_balance = current_balance  # Reset daily peak
 
 
 class NewsFilter:
@@ -1090,6 +1099,11 @@ class LiveTrader:
         
         # Place order
         order_type = 'buy' if signal['direction'] == 'bullish' else 'sell'
+        
+        # Random delay 1-2 seconds to avoid prop firm detection
+        delay = random.uniform(1.0, 2.0)
+        logger.info(f"Adding {delay:.2f}s random delay before order execution")
+        time.sleep(delay)
         
         result = self.mt5.place_order(
             symbol=symbol,
