@@ -218,32 +218,201 @@ def get_all_profitable_indices() -> list:
     return list(PROFITABLE_INDICES.keys())
 
 
-def calculate_position_size(account_balance: float, risk_percent: float, 
-                           sl_points: float, point_value: float) -> float:
+def get_broker_symbol_specs(symbol: str) -> dict:
     """
-    Calculate position size based on risk
+    Get live symbol specifications from broker (MT5)
+    This ensures we use actual broker data for calculations
+    
+    Returns:
+        dict with contract_size, tick_size, tick_value, point, 
+        volume_min, volume_max, volume_step, margin_per_lot, point_value
+    """
+    try:
+        import MetaTrader5 as mt5
+        
+        sym_info = mt5.symbol_info(symbol)
+        if sym_info is None:
+            return None
+        
+        # Calculate margin required for 1 lot
+        margin_per_lot = mt5.order_calc_margin(
+            mt5.ORDER_TYPE_BUY, 
+            symbol, 
+            1.0, 
+            sym_info.ask
+        ) or 0
+        
+        # Calculate ACTUAL point value using order_calc_profit
+        # This is the most accurate way - ask MT5 directly what profit 
+        # we get for a 1 full index point move with 1 lot
+        point_value = mt5.order_calc_profit(
+            mt5.ORDER_TYPE_BUY,
+            symbol,
+            1.0,  # 1 lot
+            sym_info.ask,
+            sym_info.ask + 1.0  # 1 full index point move
+        ) or 0
+        
+        # Fallback if order_calc_profit fails
+        if point_value == 0 and sym_info.trade_tick_size > 0:
+            ticks_per_point = 1.0 / sym_info.trade_tick_size
+            point_value = sym_info.trade_tick_value * ticks_per_point
+        
+        return {
+            'contract_size': sym_info.trade_contract_size,
+            'tick_size': sym_info.trade_tick_size,
+            'tick_value': sym_info.trade_tick_value,
+            'point': sym_info.point,
+            'point_value': point_value,  # ACTUAL profit per 1 index point per lot
+            'volume_min': sym_info.volume_min,
+            'volume_max': sym_info.volume_max,
+            'volume_step': sym_info.volume_step,
+            'margin_per_lot': margin_per_lot,
+            'currency_profit': sym_info.currency_profit,
+            'currency_margin': sym_info.currency_margin,
+        }
+    except Exception as e:
+        return None
+
+
+def get_account_leverage() -> int:
+    """Get account leverage from broker"""
+    try:
+        import MetaTrader5 as mt5
+        info = mt5.account_info()
+        return info.leverage if info else 100
+    except:
+        return 100
+
+
+def calculate_position_size(account_balance: float, risk_percent: float, 
+                           sl_points: float, point_value: float,
+                           volume_min: float = 0.01, volume_max: float = 40.0,
+                           volume_step: float = 0.01) -> float:
+    """
+    Calculate position size based on risk using broker specifications
     
     Args:
         account_balance: Current account balance
         risk_percent: Risk percentage (e.g., 1.0 for 1%)
         sl_points: Stop loss distance in points
-        point_value: Value per point per lot
+        point_value: Value per point per lot (from broker data)
+        volume_min: Minimum lot size (from broker)
+        volume_max: Maximum lot size (from broker)
+        volume_step: Lot step size (from broker)
     
     Returns:
-        Position size in lots
+        Position size in lots (respecting broker limits)
     """
     risk_amount = account_balance * (risk_percent / 100)
     risk_per_lot = sl_points * point_value
     
     if risk_per_lot <= 0:
-        return 0
+        return volume_min
     
     lots = risk_amount / risk_per_lot
     
-    # Round down to 2 decimal places (0.01 lot minimum)
-    lots = int(lots * 100) / 100
+    # Round down to volume_step
+    lots = int(lots / volume_step) * volume_step
     
-    return max(0.01, lots)
+    # Apply broker limits
+    lots = max(volume_min, min(lots, volume_max))
+    
+    return lots
+
+
+def calculate_position_size_with_broker_data(symbol: str, account_balance: float, 
+                                              risk_percent: float, sl_points: float,
+                                              free_margin: float = None,
+                                              max_margin_percent: float = 90.0) -> dict:
+    """
+    Calculate position size using live broker data
+    
+    Args:
+        symbol: Trading symbol
+        account_balance: Current account balance
+        risk_percent: Risk percentage
+        sl_points: Stop loss distance in points
+        free_margin: Available margin (if None, uses account_balance)
+        max_margin_percent: Max % of free margin to use (default 90%)
+    
+    Returns:
+        dict with lots, risk_amount, margin_required, etc.
+    """
+    specs = get_broker_symbol_specs(symbol)
+    if not specs:
+        # Fallback to config values
+        config = get_index_config(symbol)
+        if not config:
+            return {'lots': 0.01, 'error': 'Symbol not found'}
+        
+        lots = calculate_position_size(
+            account_balance, risk_percent, sl_points, 
+            config.get('point_value', 1.0)
+        )
+        return {
+            'lots': lots,
+            'risk_amount': account_balance * (risk_percent / 100),
+            'margin_required': 0,
+            'source': 'config_fallback'
+        }
+    
+    # Use broker data
+    point_value = specs['point_value']
+    risk_amount = account_balance * (risk_percent / 100)
+    margin_per_lot = specs['margin_per_lot']
+    
+    # Calculate lots based on risk
+    lots = calculate_position_size(
+        account_balance, risk_percent, sl_points, point_value,
+        specs['volume_min'], specs['volume_max'], specs['volume_step']
+    )
+    
+    margin_required = margin_per_lot * lots
+    
+    # Use free_margin if provided, else use account_balance
+    available_margin = free_margin if free_margin is not None else account_balance
+    max_margin_allowed = available_margin * (max_margin_percent / 100)
+    
+    # Check if margin exceeds limit - reduce lots if needed
+    margin_reduced = False
+    original_lots = lots
+    
+    if margin_required > max_margin_allowed and margin_per_lot > 0:
+        # Reduce lots to fit within margin limit
+        max_lots_by_margin = max_margin_allowed / margin_per_lot
+        
+        # Round down to volume_step
+        max_lots_by_margin = int(max_lots_by_margin / specs['volume_step']) * specs['volume_step']
+        
+        # Apply minimum
+        max_lots_by_margin = max(specs['volume_min'], max_lots_by_margin)
+        
+        if max_lots_by_margin < lots:
+            lots = max_lots_by_margin
+            margin_required = margin_per_lot * lots
+            margin_reduced = True
+            
+            # Recalculate actual risk with reduced lots
+            actual_risk = lots * sl_points * point_value
+            actual_risk_percent = (actual_risk / account_balance) * 100
+    
+    return {
+        'lots': lots,
+        'risk_amount': risk_amount,
+        'risk_per_lot': sl_points * point_value,
+        'point_value': point_value,
+        'margin_required': margin_required,
+        'margin_per_lot': margin_per_lot,
+        'contract_size': specs['contract_size'],
+        'volume_min': specs['volume_min'],
+        'volume_max': specs['volume_max'],
+        'source': 'broker_live',
+        'margin_reduced': margin_reduced,
+        'original_lots': original_lots if margin_reduced else lots,
+        'max_margin_percent': max_margin_percent,
+        'available_margin': available_margin
+    }
 
 
 if __name__ == '__main__':

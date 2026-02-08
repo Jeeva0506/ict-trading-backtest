@@ -28,6 +28,8 @@ from config_fundednext import (
     PROFITABLE_INDICES, 
     get_index_config,
     calculate_position_size,
+    calculate_position_size_with_broker_data,
+    get_broker_symbol_specs,
     MT5_SERVER,
     MT5_LOGIN,
     MT5_PASSWORD,
@@ -728,18 +730,53 @@ class LiveTrader:
         symbol = signal['symbol']
         config = get_index_config(symbol)
         
-        # Calculate position size
+        # Get account info
         account = self.mt5.get_account_info()
-        risk_amount = account['balance'] * (FUNDEDNEXT_RULES['risk_per_trade_percent'] / 100)
         sl_points = signal['risk_points']
-        point_value = config.get('point_value', 1.0)
         
-        volume = calculate_position_size(
-            account['balance'],
-            FUNDEDNEXT_RULES['risk_per_trade_percent'],
-            sl_points,
-            point_value
+        # Calculate position size using LIVE BROKER DATA
+        # Pass free_margin to enable 90% margin limit check
+        sizing = calculate_position_size_with_broker_data(
+            symbol=symbol,
+            account_balance=account['balance'],
+            risk_percent=FUNDEDNEXT_RULES['risk_per_trade_percent'],
+            sl_points=sl_points,
+            free_margin=account['free_margin'],
+            max_margin_percent=90.0  # Max 90% of available margin
         )
+        
+        volume = sizing['lots']
+        risk_amount = sizing['risk_amount']
+        margin_required = sizing.get('margin_required', 0)
+        
+        # Log position sizing details
+        logger.info(f"Position Sizing for {symbol}:")
+        logger.info(f"  SL Distance: {sl_points} points")
+        logger.info(f"  Point Value: ${sizing.get('point_value', 'N/A')}/point/lot")
+        logger.info(f"  Risk Amount: ${risk_amount:.2f}")
+        logger.info(f"  Lot Size: {volume}")
+        logger.info(f"  Margin Required: ${margin_required:.2f}")
+        logger.info(f"  Free Margin: ${account['free_margin']:.2f}")
+        logger.info(f"  Data Source: {sizing.get('source', 'unknown')}")
+        
+        # Log if lots were reduced due to margin limit
+        if sizing.get('margin_reduced', False):
+            original_lots = sizing.get('original_lots', volume)
+            logger.warning(f"  ⚠️ Lots reduced from {original_lots} to {volume} (90% margin limit)")
+            self.telegram.send_message(
+                f"⚠️ <b>POSITION REDUCED - {symbol}</b>\n\n"
+                f"Original lots: {original_lots}\n"
+                f"Reduced to: {volume}\n"
+                f"Reason: 90% margin limit\n"
+                f"Margin used: ${margin_required:.2f} / ${account['free_margin']:.2f}"
+            )
+        
+        # Final margin check (should always pass now with 90% limit)
+        if margin_required > account['free_margin']:
+            logger.warning(f"Insufficient margin: Need ${margin_required:.2f}, Have ${account['free_margin']:.2f}")
+            self.telegram.error_alert("Insufficient Margin", 
+                f"Need ${margin_required:.2f}, Have ${account['free_margin']:.2f}")
+            return False
         
         # Place order
         order_type = 'buy' if signal['direction'] == 'bullish' else 'sell'
