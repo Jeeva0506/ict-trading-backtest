@@ -479,7 +479,26 @@ def is_market_open(symbol: str) -> bool:
     if not config:
         return False
     
-    now = datetime.now()  # Assuming MT5 server time
+    # Get MT5 server time from tick data (most accurate)
+    try:
+        tick = mt5.symbol_info_tick(symbol)
+        if tick and tick.time:
+            now = datetime.fromtimestamp(tick.time)
+        else:
+            # Fallback: Convert local time to MT5 server time
+            # MT5 server is GMT+2 (winter) or GMT+3 (summer DST)
+            import pytz
+            local_tz = pytz.timezone('Asia/Kolkata')  # IST
+            mt5_tz = pytz.timezone('Europe/Helsinki')  # GMT+2/+3 same as MT5
+            local_now = datetime.now(local_tz)
+            now = local_now.astimezone(mt5_tz).replace(tzinfo=None)
+    except Exception:
+        # If MT5 not connected, use timezone conversion
+        import pytz
+        local_tz = pytz.timezone('Asia/Kolkata')
+        mt5_tz = pytz.timezone('Europe/Helsinki')
+        local_now = datetime.now(local_tz)
+        now = local_now.astimezone(mt5_tz).replace(tzinfo=None)
     
     # Check if it's a weekday (Monday=0, Sunday=6)
     if now.weekday() >= 5:  # Saturday or Sunday
@@ -1100,19 +1119,64 @@ class LiveTrader:
         strategy.risk_percent = current_risk
         strategy.risk_amount = self.state.current_balance * (current_risk / 100)
         
-        # Get today's high/low
-        today_data = df[df.index.date == datetime.now().date()]
+        # Get MT5 server time (from tick data or timezone conversion)
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick and tick.time:
+                mt5_now = datetime.fromtimestamp(tick.time)
+            else:
+                import pytz
+                local_tz = pytz.timezone('Asia/Kolkata')
+                mt5_tz = pytz.timezone('Europe/Helsinki')
+                mt5_now = datetime.now(local_tz).astimezone(mt5_tz).replace(tzinfo=None)
+        except Exception:
+            import pytz
+            local_tz = pytz.timezone('Asia/Kolkata')
+            mt5_tz = pytz.timezone('Europe/Helsinki')
+            mt5_now = datetime.now(local_tz).astimezone(mt5_tz).replace(tzinfo=None)
+        
+        mt5_today = mt5_now.date()
+        
+        # Get today's data - using MT5 server date
+        today_data = df[df.index.date == mt5_today]
         if len(today_data) < 30:
             return None
         
-        day_high = today_data['high'].max()
-        day_low = today_data['low'].min()
+        # Get previous day data for PDH/PDL (matches backtest)
+        yesterday = mt5_today - timedelta(days=1)
+        prev_day_data = df[df.index.date == yesterday]
+        if len(prev_day_data) > 0:
+            pdh = prev_day_data['high'].max()
+            pdl = prev_day_data['low'].min()
+        else:
+            pdh = None
+            pdl = None
         
-        # Generate signals
+        # Filter to session start time (exclude pre-market structure)
+        # Use MT5 server time for session start
+        session_start_hour = config['mt5_open_hour']
+        session_start_minute = config['mt5_open_minute']
+        session_start = pd.Timestamp(mt5_today).replace(
+            hour=session_start_hour, 
+            minute=session_start_minute
+        )
+        market_hours_data = today_data[today_data.index >= session_start]
+        
+        if len(market_hours_data) < 10:
+            return None
+        
+        # Use session data for day high/low (excludes pre-market extremes)
+        day_high = market_hours_data['high'].max()
+        day_low = market_hours_data['low'].min()
+        
+        # Generate signals - pass full today_data for structure analysis (matches backtest)
+        # but use session-filtered day_high/day_low
         signals = strategy.generate_signals(
-            df=today_data,
+            df=today_data,  # Full day data for structure/order block detection
             day_high=day_high,
             day_low=day_low,
+            pdh=pdh,  # Previous day high
+            pdl=pdl,  # Previous day low
             debug=False
         )
         
