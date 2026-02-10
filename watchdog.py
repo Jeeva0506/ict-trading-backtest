@@ -11,23 +11,34 @@ import time
 import psutil
 import os
 import sys
+import io
 from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 
-# Setup logging
+# Setup logging with UTF-8 encoding for Windows Task Scheduler
 log_dir = Path(__file__).parent / 'live' / 'logs'
 log_dir.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_dir / 'watchdog.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# File handler
+file_handler = logging.FileHandler(log_dir / 'watchdog.log', encoding='utf-8')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Console handler with UTF-8 for Windows
+if sys.platform == 'win32':
+    console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+else:
+    console_stream = sys.stdout
+console_handler = logging.StreamHandler(console_stream)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 # Add path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'live'))

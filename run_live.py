@@ -9,9 +9,15 @@ Usage:
     python run_live.py --status     # Check current status
 """
 import sys
+import io
 import argparse
 from pathlib import Path
 from datetime import datetime
+
+# Fix Windows console encoding for Unicode characters
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent))  # backtest_engine folder

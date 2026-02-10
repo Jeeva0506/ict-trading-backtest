@@ -52,16 +52,27 @@ from sl_protection import (
     close_all_positions as sl_close_all
 )
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('live/logs/trading.log'),
-        logging.StreamHandler()
-    ]
-)
+# Setup logging with UTF-8 encoding for console (fixes Windows Task Scheduler)
+import io
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# File handler with UTF-8
+file_handler = logging.FileHandler('live/logs/trading.log', encoding='utf-8')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Console handler with UTF-8 for Windows
+if sys.platform == 'win32':
+    console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+else:
+    console_stream = sys.stdout
+console_handler = logging.StreamHandler(console_stream)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 
 @dataclass
