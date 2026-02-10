@@ -474,28 +474,22 @@ class MT5Connector:
 
 
 def is_market_open(symbol: str) -> bool:
-    """Check if market is open for this symbol (in MT5 server time)"""
+    """Check if market is open for this symbol (in MT5 server time EET/EEST)"""
     config = get_index_config(symbol)
     if not config:
         return False
     
-    # Get MT5 server time from tick data (most accurate)
+    # Always use proper timezone conversion to EET (Europe/Helsinki = GMT+2/+3)
+    # This is more reliable than tick.time which can be misinterpreted
+    import pytz
     try:
-        tick = mt5.symbol_info_tick(symbol)
-        if tick and tick.time:
-            now = datetime.fromtimestamp(tick.time)
-        else:
-            # Fallback: Convert local time to MT5 server time
-            # MT5 server is GMT+2 (winter) or GMT+3 (summer DST)
-            import pytz
-            local_tz = pytz.timezone('Asia/Kolkata')  # IST
-            mt5_tz = pytz.timezone('Europe/Helsinki')  # GMT+2/+3 same as MT5
-            local_now = datetime.now(local_tz)
-            now = local_now.astimezone(mt5_tz).replace(tzinfo=None)
+        # Convert current UTC time to EET (MT5 server timezone)
+        utc_now = datetime.now(pytz.UTC)
+        mt5_tz = pytz.timezone('Europe/Helsinki')  # EET/EEST same as FundedNext
+        now = utc_now.astimezone(mt5_tz).replace(tzinfo=None)
     except Exception:
-        # If MT5 not connected, use timezone conversion
-        import pytz
-        local_tz = pytz.timezone('Asia/Kolkata')
+        # Fallback: Convert local time to MT5 server time
+        local_tz = pytz.timezone('Asia/Kolkata')  # IST
         mt5_tz = pytz.timezone('Europe/Helsinki')
         local_now = datetime.now(local_tz)
         now = local_now.astimezone(mt5_tz).replace(tzinfo=None)
@@ -506,7 +500,7 @@ def is_market_open(symbol: str) -> bool:
     
     current_time = now.hour * 60 + now.minute
     
-    # Market hours in MT5 time
+    # Market hours in MT5 time (based on actual stock exchange hours)
     open_time = config['mt5_open_hour'] * 60 + config['mt5_open_minute']
     close_time = config['mt5_close_hour'] * 60 + config['mt5_close_minute']
     

@@ -35,6 +35,50 @@ sys.path.insert(0, str(Path(__file__).parent / 'live'))
 from config_fundednext import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 from telegram_notifier import TelegramNotifier
 
+# Lock file to prevent multiple watchdog instances
+LOCK_FILE = Path(__file__).parent / 'live' / 'logs' / 'watchdog.lock'
+
+def acquire_lock():
+    """Try to acquire exclusive lock. Returns True if successful, False if another instance is running."""
+    import msvcrt
+    try:
+        # Create lock file with exclusive access
+        if LOCK_FILE.exists():
+            # Check if the PID in the lock file is still running
+            try:
+                with open(LOCK_FILE, 'r') as f:
+                    old_pid = int(f.read().strip())
+                if psutil.pid_exists(old_pid):
+                    # Check if it's actually a python process
+                    try:
+                        proc = psutil.Process(old_pid)
+                        if 'python' in proc.name().lower():
+                            logger.error(f"Another watchdog is already running (PID: {old_pid})")
+                            return False
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            except (ValueError, FileNotFoundError):
+                pass
+        
+        # Write our PID to the lock file
+        with open(LOCK_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        
+        logger.info(f"Lock acquired, PID: {os.getpid()}")
+        return True
+    except Exception as e:
+        logger.error(f"Error acquiring lock: {e}")
+        return False
+
+def release_lock():
+    """Release the lock file"""
+    try:
+        if LOCK_FILE.exists():
+            LOCK_FILE.unlink()
+            logger.info("Lock released")
+    except Exception as e:
+        logger.error(f"Error releasing lock: {e}")
+
 
 class TradingWatchdog:
     """Monitors and restarts the trading bot if needed"""
@@ -55,11 +99,17 @@ class TradingWatchdog:
         """Start the trading bot process"""
         logger.info("Starting trading bot...")
         
+        # Capture stderr to a file to debug crashes
+        stderr_log = Path(__file__).parent / 'live' / 'logs' / 'bot_stderr.log'
+        self.stderr_file = open(stderr_log, 'a', encoding='utf-8')
+        self.stderr_file.write(f"\n\n=== Bot started at {datetime.now()} ===\n")
+        self.stderr_file.flush()
+        
         self.process = subprocess.Popen(
             [str(self.python_path), str(self.script_path)],
             cwd=str(Path(__file__).parent),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=self.stderr_file,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
         )
         
@@ -242,5 +292,13 @@ class TradingWatchdog:
 
 
 if __name__ == '__main__':
-    watchdog = TradingWatchdog()
-    watchdog.run()
+    # Prevent multiple watchdog instances
+    if not acquire_lock():
+        logger.error("Failed to acquire lock - another watchdog may be running. Exiting.")
+        sys.exit(1)
+    
+    try:
+        watchdog = TradingWatchdog()
+        watchdog.run()
+    finally:
+        release_lock()
