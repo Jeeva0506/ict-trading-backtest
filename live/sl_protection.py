@@ -406,9 +406,9 @@ def verify_sl_after_entry(ticket: int, expected_sl: float, expected_tp: float, s
                 track_original_sl(ticket, expected_sl)
                 
                 if logger:
-                    logger.info(f"✓ SL Verified: {symbol} at {expected_sl} (ticket {ticket})")
+                    logger.info(f"[OK] SL Verified: {symbol} at {expected_sl} (ticket {ticket})")
                 
-                send_telegram_alert(f"✓ <b>SL Verified</b>\n\nSymbol: {symbol}\nTicket: {ticket}\nSL: {expected_sl}\nTP: {expected_tp}")
+                send_telegram_alert(f"[OK] <b>SL Verified</b>\n\nSymbol: {symbol}\nTicket: {ticket}\nSL: {expected_sl}\nTP: {expected_tp}")
                 
                 return True
         
@@ -896,7 +896,7 @@ def reconnect_mt5() -> bool:
             if mt5.initialize():
                 if logger:
                     logger.info("MT5 reconnected successfully")
-                send_telegram_alert("✓ MT5 reconnected successfully")
+                send_telegram_alert("[OK] MT5 reconnected successfully")
                 return True
             else:
                 if logger:
@@ -1007,9 +1007,9 @@ def start_monitoring() -> Tuple[threading.Thread, threading.Thread]:
     _connection_thread.start()
     
     if logger:
-        logger.info("✓ SL Protection monitoring threads started")
+        logger.info("[OK] SL Protection monitoring threads started")
     
-    send_telegram_alert("✓ <b>SL Protection Active</b>\n\nPosition and connection monitoring started")
+    send_telegram_alert("[OK] <b>SL Protection Active</b>\n\nPosition and connection monitoring started")
     
     return (_monitor_thread, _connection_thread)
 

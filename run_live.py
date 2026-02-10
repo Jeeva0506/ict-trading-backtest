@@ -31,28 +31,28 @@ from config_fundednext import FUNDEDNEXT_RULES, PROFITABLE_INDICES
 def show_banner():
     """Display startup banner"""
     print("""
-    ╔══════════════════════════════════════════════════════════════╗
-    ║         FUNDEDNEXT ICT TRADING BOT v1.0                     ║
-    ║         ─────────────────────────────────                   ║
-    ║         4 Profitable Indices | 24/7 Operation               ║
-    ╚══════════════════════════════════════════════════════════════╝
+    +==============================================================+
+    |         FUNDEDNEXT ICT TRADING BOT v1.0                     |
+    |         --------------------------------                    |
+    |         4 Profitable Indices | 24/7 Operation               |
+    +==============================================================+
     """)
 
 
 def show_status():
     """Show current trading status"""
-    print("\n📊 TRADING STATUS")
+    print("\n[CHART] TRADING STATUS")
     print("=" * 60)
     
     # Connect to MT5
     mt5 = MT5Connector()
     if not mt5.connect():
-        print("❌ Cannot connect to MT5")
+        print("[ERROR] Cannot connect to MT5")
         return
     
     # Account info
     account = mt5.get_account_info()
-    print(f"\n💰 Account:")
+    print(f"\n[ACCOUNT]:")
     print(f"   Balance: ${account['balance']:,.2f}")
     print(f"   Equity: ${account['equity']:,.2f}")
     print(f"   Profit: ${account['profit']:,.2f}")
@@ -60,24 +60,24 @@ def show_status():
     
     # Open positions
     positions = mt5.get_open_positions()
-    print(f"\n📈 Open Positions: {len(positions)}")
+    print(f"\n[POSITIONS] Open Positions: {len(positions)}")
     for pos in positions:
-        icon = '🟢' if pos['profit'] > 0 else '🔴'
+        icon = '[+]' if pos['profit'] > 0 else '[-]'
         print(f"   {icon} {pos['symbol']} {pos['type'].upper()} {pos['volume']} lots | P&L: ${pos['profit']:,.2f}")
     
     # Active markets
     active = get_active_indices()
-    print(f"\n⏰ Active Markets Now: {active if active else 'None'}")
+    print(f"\n[TIME] Active Markets Now: {active if active else 'None'}")
     
     # All markets status
-    print(f"\n📍 Index Trading Hours (MT5 Server Time):")
+    print(f"\n[MARKETS] Index Trading Hours (MT5 Server Time):")
     for symbol, config in PROFITABLE_INDICES.items():
-        is_active = "🟢 OPEN" if symbol in active else "🔴 CLOSED"
+        is_active = "[OPEN]" if symbol in active else "[CLOSED]"
         print(f"   {symbol}: {config['mt5_open_hour']:02d}:{config['mt5_open_minute']:02d} - {config['mt5_close_hour']:02d}:{config['mt5_close_minute']:02d} {is_active}")
     
     # News check
     calendar = EconomicCalendar()
-    print(f"\n📰 High-Impact News Today:")
+    print(f"\n[NEWS] High-Impact News Today:")
     today_events = calendar.get_all_today_events()
     if today_events:
         for event in today_events[:5]:  # Show first 5
@@ -92,17 +92,17 @@ def show_status():
 
 def show_config():
     """Display current configuration"""
-    print("\n⚙️ TRADING CONFIGURATION")
+    print("\n[CONFIG] TRADING CONFIGURATION")
     print("=" * 60)
     
-    print("\n📋 FundedNext Stellar-2 Rules:")
+    print("\n[RULES] FundedNext Stellar-2 Rules:")
     print(f"   Max Drawdown: {FUNDEDNEXT_RULES['max_drawdown_percent']}%")
     print(f"   Daily Drawdown: {FUNDEDNEXT_RULES['daily_drawdown_percent']}%")
     print(f"   Daily DD Stop: {FUNDEDNEXT_RULES['daily_drawdown_stop']}%")
     print(f"   Risk per Trade: {FUNDEDNEXT_RULES['risk_per_trade_percent']}%")
     print(f"   News Buffer: {FUNDEDNEXT_RULES['news_buffer_minutes']} minutes")
     
-    print("\n📊 Profitable Indices:")
+    print("\n[INDICES] Profitable Indices:")
     for symbol, config in PROFITABLE_INDICES.items():
         print(f"\n   {symbol} ({config['description']}):")
         print(f"      Contract Size: {config['contract_size']}")
@@ -112,48 +112,48 @@ def show_config():
 
 def run_test_mode():
     """Run in test mode - generate signals but don't execute"""
-    print("\n🧪 TEST MODE - No real trades will be placed")
+    print("\n[TEST] TEST MODE - No real trades will be placed")
     print("=" * 60)
     
     mt5 = MT5Connector()
     if not mt5.connect():
-        print("❌ Cannot connect to MT5")
+        print("[ERROR] Cannot connect to MT5")
         return
     
     calendar = EconomicCalendar()
     
     # Check each symbol
     for symbol in PROFITABLE_INDICES.keys():
-        print(f"\n📍 Checking {symbol}...")
+        print(f"\n[CHECK] Checking {symbol}...")
         
         # Market status
         active = get_active_indices()
         if symbol not in active:
-            print(f"   ⏸️ Market closed")
+            print(f"   [PAUSE] Market closed")
             continue
         
-        print(f"   ✅ Market open")
+        print(f"   [OK] Market open")
         
         # News check
         is_news, event = calendar.is_news_time(symbol)
         if is_news:
-            print(f"   ⚠️ News time: {event['title']}")
+            print(f"   [WARNING] News time: {event['title']}")
             continue
         
-        print(f"   ✅ No high-impact news")
+        print(f"   [OK] No high-impact news")
         
         # Get data
         df = mt5.get_ohlc_data(symbol, count=200)
         if df.empty:
-            print(f"   ❌ Cannot get data")
+            print(f"   [ERROR] Cannot get data")
             continue
         
-        print(f"   📊 Got {len(df)} candles")
-        print(f"   📈 Current price: {df['close'].iloc[-1]:.2f}")
-        print(f"   📉 Today's range: {df['low'].min():.2f} - {df['high'].max():.2f}")
+        print(f"   [DATA] Got {len(df)} candles")
+        print(f"   [PRICE] Current price: {df['close'].iloc[-1]:.2f}")
+        print(f"   [RANGE] Today's range: {df['low'].min():.2f} - {df['high'].max():.2f}")
     
     mt5.disconnect()
-    print("\n✅ Test complete")
+    print("\n[OK] Test complete")
 
 
 def run_live():
@@ -162,7 +162,7 @@ def run_live():
     show_config()
     
     print("\n" + "=" * 60)
-    print("🚀 STARTING LIVE TRADING")
+    print("[START] STARTING LIVE TRADING")
     print("=" * 60)
     print(f"   Start time: {datetime.now()}")
     print(f"   Mode: 24/7 Automated")
@@ -174,7 +174,7 @@ def run_live():
     if trader.initialize():
         trader.run()
     else:
-        print("❌ Failed to initialize trader")
+        print("[ERROR] Failed to initialize trader")
         sys.exit(1)
 
 
