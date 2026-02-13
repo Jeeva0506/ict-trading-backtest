@@ -281,5 +281,5 @@ def run_live_simulation(run_days: int | None = 15, debug_strategy: bool = False,
 
 
 if __name__ == "__main__":
-    # quick validation default: first 15 days + debug ON
+    # full year run
     run_live_simulation(run_days=15, debug_strategy=True, symbol="SPX500")

@@ -95,8 +95,8 @@ class StrategyICTClean:
         c = df.iloc[i]
         prev = df.iloc[i-1]
 
-        sh = next((x for x in reversed(highs) if x < i), None)
-        sl = next((x for x in reversed(lows) if x < i), None)
+        sh = next((x for x in reversed(highs) if x <= i - self.swing_lookback), None)
+        sl = next((x for x in reversed(lows) if x <= i - self.swing_lookback), None)
         if sh is None or sl is None:
             return None
 
@@ -269,6 +269,11 @@ class StrategyICTClean:
                 if self.trend and d!=self.trend:
                     self.sweep_active=True
                     self.pullback_start=i
+                    self.ob1=None
+                    self.ob1_touch_idx=None
+                    self.ob1_touch_price=None
+                    self.choch=False
+                    self.choch_idx=None
                     self._log(event="SWEEP",time=c.name,trend=self.trend)
 
                 continue
