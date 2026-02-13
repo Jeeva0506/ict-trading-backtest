@@ -103,103 +103,10 @@ class TradingWatchdog:
         self.max_restarts_per_hour = 5
         self.restart_times = []
         self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        self.last_heartbeat = datetime.now()
-        self.heartbeat_file = Path(__file__).parent / 'live' / 'logs' / 'heartbeat.txt'
-    
-    def start_bot(self):
-        """Start the trading bot process"""
-        logger.info("Starting trading bot...")
-        
-        # Capture stderr to a file to debug crashes
-        stderr_log = Path(__file__).parent / 'live' / 'logs' / 'bot_stderr.log'
-        self.stderr_file = open(stderr_log, 'a', encoding='utf-8')
-        self.stderr_file.write(f"\n\n=== Bot started at {datetime.now()} ===\n")
-        self.stderr_file.flush()
-        
-        self.process = subprocess.Popen(
-            [str(self.python_path), str(self.script_path)],
-            cwd=str(Path(__file__).parent),
-            stdout=subprocess.DEVNULL,
-            stderr=self.stderr_file,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-        
-        self.start_time = datetime.now()
-        self.restart_times.append(self.start_time)
-        
-        # Clean old restart times (keep last hour only)
-        one_hour_ago = datetime.now() - timedelta(hours=1)
-        self.restart_times = [t for t in self.restart_times if t > one_hour_ago]
-        
-        logger.info(f"Bot started with PID: {self.process.pid}")
-        return True
-    
-    def is_bot_running(self) -> bool:
-        """Check if bot process is still running"""
-        if self.process is None:
-            return False
-        return self.process.poll() is None
-    
-    def is_bot_frozen(self) -> bool:
-        """Check if bot is frozen (no heartbeat update)"""
-        if not self.heartbeat_file.exists():
-            return False  # First run, no heartbeat yet
-        
-        try:
-            mtime = datetime.fromtimestamp(self.heartbeat_file.stat().st_mtime)
-            # If heartbeat not updated in 5 minutes, consider frozen
-            if datetime.now() - mtime > timedelta(minutes=5):
-                return True
-        except:
-            pass
-        return False
-    
-    def check_mt5_process(self) -> bool:
-        """Check if MT5 terminal is running"""
-        for proc in psutil.process_iter(['name']):
-            if 'terminal64.exe' in proc.info['name'].lower():
-                return True
-        return False
-    
-    def start_mt5(self):
-        """Attempt to start MT5 terminal"""
-        mt5_paths = [
-            r"C:\Program Files\MetaTrader 5\terminal64.exe",
-            r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe",
-            os.path.expandvars(r"%APPDATA%\MetaQuotes\Terminal\*\terminal64.exe")
-        ]
-        
-        for path in mt5_paths:
-            if os.path.exists(path):
-                logger.info(f"Starting MT5 from: {path}")
-                subprocess.Popen([path], shell=True)
-                time.sleep(10)  # Wait for MT5 to start
-                return True
-        
-        logger.error("Could not find MT5 terminal executable")
-        return False
-    
-    def check_system_resources(self) -> dict:
-        """Check system resource usage"""
-        return {
-            'cpu_percent': psutil.cpu_percent(interval=1),
-            'memory_percent': psutil.virtual_memory().percent,
-            'disk_percent': psutil.disk_usage('/').percent if os.name != 'nt' else psutil.disk_usage('C:').percent
-        }
-    
-    def kill_bot(self):
-        """Force kill the bot process"""
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=10)
-            except:
-                self.process.kill()
-            self.process = None
-    
-    def can_restart(self) -> bool:
-        """Check if we can restart (not too many restarts)"""
-        one_hour_ago = datetime.now() - timedelta(hours=1)
+        def run(self):
+            """Watchdog disabled: does nothing and exits immediately."""
+            logger.info("WATCHDOG DISABLED - Exiting immediately, no bot will be started or restarted.")
+            return
         recent_restarts = [t for t in self.restart_times if t > one_hour_ago]
         return len(recent_restarts) < self.max_restarts_per_hour
     

@@ -115,6 +115,11 @@ forex:
 # SPX500 CFD SETTINGS (1-min intraday like NIFTY)
 # ============================================================================
 spx500:
+    # Session window for NY cash (server time)
+    session_start_hour: 16
+    session_start_minute: 30
+    session_end_hour: 22
+    session_end_minute: 45
   market:
     symbol: SPX500
     contract_size: 10           # From MT4/MT5 specification

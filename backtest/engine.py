@@ -338,8 +338,10 @@ class BacktestEngine:
                 
                 signals = self.strategy.generate_signals(
                     lookback_data,
-                    day_high=day_high,
-                    day_low=day_low,
+                    day_high=None,
+                    day_low=None,
+                    pdh=prev_day_high,
+                    pdl=prev_day_low,
                     debug=False
                 )
                 
