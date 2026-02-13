@@ -191,6 +191,8 @@ def run_live_simulation(run_days: int | None = 15, debug_strategy: bool = False,
             result = "breakeven"
         elif exit_reason == "SL_HIT":
             result = "loss"
+        elif exit_reason == "SESSION_CLOSE":
+            result = "win" if pnl_points > 0 else ("breakeven" if pnl_points == 0 else "loss")
         else:
             result = "win" if pnl_points > 0 else ("breakeven" if pnl_points == 0 else "loss")
 

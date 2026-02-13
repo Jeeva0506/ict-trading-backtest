@@ -235,6 +235,7 @@ class StrategyICTClean:
         out=[]
 
         highs,lows=find_swing_highs_lows(df,self.swing_lookback)
+        cutoff = df.index[-1] - pd.Timedelta(minutes=15)
 
         for i in range(self.swing_lookback,len(df)):
             c=df.iloc[i]
@@ -245,9 +246,26 @@ class StrategyICTClean:
                     out.append(self.trade)
                     self.trade=None
                     self.trade_taken=True
+                elif c.name >= cutoff:
+                    # 15-min early close: force close at market price
+                    t = self.trade
+                    t.exit_time = c.name
+                    t.exit_price = float(c.close)
+                    if t.direction == "bullish":
+                        t.pnl_points += (c.close - t.entry_price) * self.position
+                    else:
+                        t.pnl_points += (t.entry_price - c.close) * self.position
+                    t.exit_reason = "SESSION_CLOSE"
+                    out.append(t)
+                    self.trade = None
+                    self.trade_taken = True
                 continue
 
             if self.trade_taken:
+                continue
+
+            # no new setups in last 15 min
+            if c.name >= cutoff:
                 continue
 
             bos=self._bos(df,i,highs,lows)
@@ -331,7 +349,7 @@ class StrategyICTClean:
                 if not self._touch(c, ob2_zone):
                     continue
 
-                # entry = midpoint of OB2 zone
+                # market order entry: aim for zone midpoint (realistic fill for manual entry)
                 entry = (ob2_zone[0] + ob2_zone[1]) / 2.0
 
                 # SL = OB2 zone low - buffer (bullish) or OB2 zone high + buffer (bearish)
@@ -355,13 +373,16 @@ class StrategyICTClean:
                 self.position=1
                 self._log(event="ENTRY",time=c.name)
 
-        # session-end: force close open trade at BE
+        # safety fallback: close any surviving trade at market
         if self.trade and self.trade.exit_reason is None:
             t = self.trade
             t.exit_time = df.index[-1]
             t.exit_price = float(df.iloc[-1].close)
-            t.exit_reason = "SL_BE"
-            t.pnl_points += 0.0
+            if t.direction == "bullish":
+                t.pnl_points += (t.exit_price - t.entry_price) * self.position
+            else:
+                t.pnl_points += (t.entry_price - t.exit_price) * self.position
+            t.exit_reason = "SESSION_CLOSE"
             out.append(t)
             self.trade = None
 
