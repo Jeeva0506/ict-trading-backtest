@@ -21,12 +21,12 @@ Trades 4 index CFDs on MetaTrader 5 with full safety systems built in.
 
 | Metric | Value |
 |---|---|
-| Total Trades | 253 |
-| Win Rate | 55.3% |
-| Profit Factor | 1.78 |
-| Net Profit | $10,838 |
-| Sharpe Ratio | 3.56 |
-| Max Drawdown | 11.9% |
+| Total Trades | 540 |
+| Win Rate | 53.7% |
+| Profit Factor | 1.50 |
+| Net Profit | $21,763 |
+| Sharpe Ratio | 2.57 |
+| Max Drawdown | 13.1% |
 
 ---
 
@@ -173,13 +173,16 @@ Controlled by `ADAPTIVE_RISK` in `config_fundednext.py`:
 
 ## Locked Strategy Parameters
 
-These are optimized via 7 backtest iterations and must not be changed:
+These are Candidate #12, selected via IS/OOS validation across 3 years:
 
 ```
-disp_mult      = 1.7     # Displacement multiplier
-body_min       = 0.65    # Minimum body %
-close_strength = 0.30    # Close in top/bottom 30%
-breakout_margin= 0.10    # Close must exceed ORB by 10% of range
+disp_mult      = 1.3     # Displacement multiplier (loose for frequency)
+body_min       = 0.60    # Minimum body %
+close_strength = 0.25    # Close in top/bottom 25%
+breakout_margin= 0.05    # Close must exceed ORB by 5% of range
 orb_minutes    = 15      # Opening range: first 15 minutes
 entry_hours    = 2       # Entry window: 2 hours after ORB
+tp             = 2.5R    # Single take profit target
+be_trigger     = 1.0R    # Move SL to breakeven at 1R
+trail_buffer   = 1.0R    # Trail SL with 1R buffer after BE
 ```

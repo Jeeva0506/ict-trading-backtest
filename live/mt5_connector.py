@@ -838,10 +838,10 @@ class LiveTrader:
                 orb_minutes=cfg.get("orb_minutes", 15),
                 entry_hours=cfg.get("entry_hours", 2),
                 breakout_window_minutes=cfg.get("breakout_window_minutes", 60),
-                disp_mult=cfg.get("disp_mult", 1.7),
-                body_min=cfg.get("body_min", 0.65),
-                close_strength=cfg.get("close_strength", 0.30),
-                breakout_margin=cfg.get("breakout_margin", 0.10),
+                disp_mult=cfg.get("disp_mult", 1.3),       # C#12 default
+                body_min=cfg.get("body_min", 0.60),         # C#12 default
+                close_strength=cfg.get("close_strength", 0.25),  # C#12 default
+                breakout_margin=cfg.get("breakout_margin", 0.05),  # C#12 default
                 orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
                 min_sl_points=cfg.get("min_sl_points", 2.0),
                 max_sl_points=cfg.get("max_sl_points", 200.0),
@@ -1175,16 +1175,11 @@ class LiveTrader:
             logger.info(f"{symbol}: Slippage = {slippage:.2f} points "
                         f"(expected {expected_price}, got {fill_price})")
 
-        # Verify SL is correctly set (sl_protection: 3 retries + emergency close)
-        sl_ok = verify_sl_after_entry(ticket, sig["stop_loss"], sig["tp"], symbol)
-        if not sl_ok:
-            logger.critical(f"{symbol}: SL verification FAILED - position emergency closed")
-            self.telegram.critical_alert("SL VERIFICATION FAILED",
-                                         f"Entry on {symbol} closed because SL "
-                                         f"could not be verified")
-            return
-
-        # Track position for exit management
+        # F2 FIX: Track position and mark trade taken BEFORE SL verification.
+        # This prevents re-entry loops if SL verification fails and emergency-closes,
+        # and ensures the P&L from any emergency close is captured.
+        self.trade_taken_today[symbol] = True
+        self.state.daily_trades += 1
         self.tracked_positions[ticket] = {
             "symbol": symbol,
             "direction": sig["direction"],
@@ -1198,8 +1193,19 @@ class LiveTrader:
             "entry_time": str(datetime.now()),
         }
 
-        self.trade_taken_today[symbol] = True
-        self.state.daily_trades += 1
+        # Verify SL is correctly set (sl_protection: 3 retries + emergency close)
+        sl_ok = verify_sl_after_entry(ticket, sig["stop_loss"], sig["tp"], symbol)
+        if not sl_ok:
+            logger.critical(f"{symbol}: SL verification FAILED - position emergency closed")
+            self.telegram.critical_alert("SL VERIFICATION FAILED",
+                                         f"Entry on {symbol} closed because SL "
+                                         f"could not be verified")
+            # Capture PnL from the emergency close and clean up tracking
+            self.tracked_positions.pop(ticket, None)
+            pnl = self._get_closed_trade_pnl(ticket)
+            self.state.daily_pnl += pnl
+            self._save_state()
+            return
 
         # Journal + notification
         self.journal.add_trade({
@@ -1292,52 +1298,45 @@ class LiveTrader:
             config = get_index_config(symbol)
             if config:
                 import pytz
+                force_close_triggered = False
                 try:
                     utc_now = datetime.now(pytz.UTC)
                     # DST-safe: use market's local timezone for force-close time
                     local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
                     local_now = utc_now.astimezone(local_tz).replace(tzinfo=None)
                     now_min = local_now.hour * 60 + local_now.minute
+
+                    # Force-close times from config (local market timezone)
+                    force_h = config.get("force_close_hour", config["market_close_hour"])
+                    force_m = config.get("force_close_minute", config.get("market_close_minute", 0))
+                    close_h = config["market_close_hour"]
+                    close_m = config["market_close_minute"]
+                    force_min = force_h * 60 + force_m
+                    close_min = close_h * 60 + close_m
+
+                    if force_min <= now_min < close_min:
+                        force_close_triggered = True
                 except Exception as tz_err:
                     # C7 FIX: Fallback uses MT5 server time (EET) with MT5-specific hours
                     logger.warning(f"Timezone fallback for {symbol}: {tz_err}")
                     mt5_tz = pytz.timezone("Europe/Helsinki")
                     local_now = utc_now.astimezone(mt5_tz).replace(tzinfo=None)
                     now_min = local_now.hour * 60 + local_now.minute
-                    # C7 FIX: Use mt5_ hours (already in server time) for both force-close and close
+                    # C7 FIX: Use mt5_ hours (already in server time)
                     force_h = config["mt5_close_hour"]
                     force_m = config["mt5_close_minute"]
-                    # Force close 15 min before mt5 close
                     force_min = (force_h * 60 + force_m) - 15
                     close_min = force_h * 60 + force_m
+
                     if force_min <= now_min < close_min:
-                        logger.info(f"Force closing {ticket} ({symbol}) - session ending (fallback)")
-                        ok = self.mt5.close_position(ticket)
-                        if ok:
-                            pnl = pos["profit"]
-                            self.state.daily_pnl += pnl
-                            self.telegram.trade_closed(symbol, "SESSION_CLOSE", pnl)
-                            closed_tickets.append(ticket)
-                        else:
-                            logger.error(f"FAILED to force-close {ticket} ({symbol})! "
-                                         f"Retrying next cycle.")
-                    # C2 FIX: Do NOT continue here — let the rest of position management run
-                    # (BE moves, trailing SL, etc. still need to execute)
+                        force_close_triggered = True
 
-                # Local timezone force-close times from config
-                force_h = config.get("force_close_hour", config["market_close_hour"])
-                force_m = config.get("force_close_minute", config.get("market_close_minute", 0))
-                close_h = config["market_close_hour"]
-                close_m = config["market_close_minute"]
-
-                force_min = force_h * 60 + force_m
-                close_min = close_h * 60 + close_m
-
-                if force_min <= now_min < close_min:
+                # F1+F3 FIX: Single force-close path, use deal history for accurate PnL
+                if force_close_triggered:
                     logger.info(f"Force closing {ticket} ({symbol}) - session ending")
                     ok = self.mt5.close_position(ticket)
                     if ok:
-                        pnl = pos["profit"]
+                        pnl = self._get_closed_trade_pnl(ticket)
                         self.state.daily_pnl += pnl
                         self.telegram.trade_closed(symbol, "SESSION_CLOSE", pnl)
                         closed_tickets.append(ticket)

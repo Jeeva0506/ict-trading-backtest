@@ -78,11 +78,11 @@ class StrategyICTClean:
         entry_hours: int = 3,
         breakout_window_minutes: int = 60,
         lookback_ranges: int = 10,
-        disp_mult: float = 1.7,
-        vol_mult: float = 1.0,                     # kept for compat, not used
-        body_min: float = 0.65,
-        close_strength: float = 0.30,              # close must be in top/bottom X of candle
-        breakout_margin: float = 0.10,             # close must exceed ORB by X * orb_range
+        disp_mult: float = 1.3,                     # C#12 default
+        vol_mult: float = 1.0,                      # kept for compat, not used
+        body_min: float = 0.60,                     # C#12 default
+        close_strength: float = 0.25,               # C#12: close must be in top/bottom 25% of candle
+        breakout_margin: float = 0.05,              # C#12: close must exceed ORB by 5% of orb_range
         orb_range_min_mult: float = 0.5,           # min ORB range vs avg ORB candle range
         # --- exits ---
         tp1_r: float = 1.0,                        # BE trigger level
