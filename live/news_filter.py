@@ -65,6 +65,28 @@ class EconomicCalendar:
         self.cache = []
         self.last_fetch = None
         self.cache_file = Path(__file__).parent / 'logs' / 'news_cache.json'
+        # C4 FIX: Load cached news from disk on startup (survives restarts + API downtime)
+        self._load_cache_from_disk()
+    
+    def _load_cache_from_disk(self):
+        """Load news cache from disk if available and recent (< 6 hours old)."""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, 'r') as f:
+                    data = json.load(f)
+                fetch_time_str = data.get('fetch_time', '')
+                events = data.get('events', [])
+                if events and fetch_time_str:
+                    fetch_time = datetime.strptime(fetch_time_str[:19], '%Y-%m-%d %H:%M:%S')
+                    age_hours = (datetime.now() - fetch_time).total_seconds() / 3600
+                    if age_hours < 6:  # Only use cache if < 6 hours old
+                        self.cache = events
+                        self.last_fetch = fetch_time
+                        logger.info(f"Loaded {len(events)} cached news events from disk ({age_hours:.1f}h old)")
+                    else:
+                        logger.info(f"Disk news cache too old ({age_hours:.1f}h), will fetch fresh")
+        except Exception as e:
+            logger.warning(f"Could not load news cache from disk: {e}")
     
     def _fetch_forex_factory(self) -> List[dict]:
         """Fetch from Forex Factory"""

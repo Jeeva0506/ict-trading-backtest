@@ -48,7 +48,14 @@ POSITION_MONITOR_INTERVAL = 10  # check positions every 10 seconds
 CONNECTION_MONITOR_INTERVAL = 30  # check connection every 30 seconds
 ORDER_DEVIATION_POINTS = 20  # max slippage allowed
 RISK_PER_TRADE = float(os.environ.get('RISK_PER_TRADE', '1.5')) / 100  # convert % to decimal
+_current_risk_pct = RISK_PER_TRADE  # C3 FIX: mutable risk that tracks adaptive changes
 FAILED_CLOSE_REMINDER_INTERVAL = 120  # remind every 2 minutes for failed closes
+
+
+def update_risk_percent(risk_pct_decimal: float) -> None:
+    """C3 FIX: Called by LiveTrader whenever adaptive risk changes."""
+    global _current_risk_pct
+    _current_risk_pct = risk_pct_decimal
 
 
 def get_sl_tolerance(entry_price: float, expected_sl: float) -> float:
@@ -729,7 +736,8 @@ def monitor_open_positions() -> None:
                     continue
                 
                 # CHECK 2: Loss not exceeding limit
-                max_loss = -(account_balance * RISK_PER_TRADE * EMERGENCY_LOSS_MULTIPLIER)
+                # C3 FIX: Use dynamic _current_risk_pct (tracks adaptive risk)
+                max_loss = -(account_balance * _current_risk_pct * EMERGENCY_LOSS_MULTIPLIER)
                 if profit < max_loss:
                     if logger:
                         logger.critical(f"LOSS EXCEEDED 130%: {symbol} ticket {ticket} - Loss: ${profit:.2f}")
@@ -916,6 +924,19 @@ def reconnect_mt5() -> bool:
             time.sleep(2)
             
             if mt5.initialize():
+                # C6 FIX: Re-login to account after reinitializing MT5
+                try:
+                    from config_fundednext import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
+                    if MT5_LOGIN and MT5_PASSWORD:
+                        login_ok = mt5.login(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
+                        if not login_ok:
+                            if logger:
+                                logger.warning(f"MT5 re-login failed: {mt5.last_error()}")
+                            continue
+                        if logger:
+                            logger.info(f"MT5 re-logged into account {MT5_LOGIN}")
+                except ImportError:
+                    pass  # Config not available, rely on auto-login
                 if logger:
                     logger.info("MT5 reconnected successfully")
                 send_telegram_alert("[OK] MT5 reconnected successfully")

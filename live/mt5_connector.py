@@ -60,6 +60,7 @@ from sl_protection import (
     is_trading_paused as sl_is_trading_paused,
     close_all_positions as sl_close_all,
     track_original_sl as sl_track_original_sl,
+    update_risk_percent as sl_update_risk,
 )
 from news_filter import EconomicCalendar
 
@@ -708,7 +709,8 @@ class LiveTrader:
 
         account = self.mt5.get_account_info()
         balance = account.get("balance", ACCOUNT_SIZE)
-        self.dd_protection = DrawdownProtection(balance)
+        # C1 FIX: Use ACCOUNT_SIZE for overall DD floor (FundedNext measures from initial balance)
+        self.dd_protection = DrawdownProtection(ACCOUNT_SIZE)
         self.state.current_balance = balance
         self.state.daily_start_balance = balance
         self.state.last_reset_date = datetime.now().strftime("%Y-%m-%d")
@@ -755,7 +757,19 @@ class LiveTrader:
     #  Daily reset
     # ────────────────────────────────────────────────────────────────────
     def _check_daily_reset(self):
-        today = datetime.now().strftime("%Y-%m-%d")
+        # C5 FIX: FundedNext resets daily DD at 5:00 PM EST = 00:00 EET (MT5 server time)
+        # Use MT5 server time for day boundary to match FundedNext's reset
+        import pytz
+        try:
+            est = pytz.timezone('US/Eastern')
+            fn_day = datetime.now(est).strftime("%Y-%m-%d")
+            # FundedNext day flips at 5 PM EST — if before 5 PM, it's still "yesterday" for FN
+            est_now = datetime.now(est)
+            if est_now.hour < 17:
+                fn_day = (est_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        except Exception:
+            fn_day = datetime.now().strftime("%Y-%m-%d")
+        today = fn_day
         if self.state.last_reset_date != today:
             logger.info(f"New day: {today} - resetting daily counters "
                         f"(prev PnL: ${self.state.daily_pnl:.2f})")
@@ -1002,6 +1016,9 @@ class LiveTrader:
         free_margin = account["free_margin"]
         risk_pct = self.dd_protection.get_adaptive_risk(balance)
 
+        # C3 FIX: Sync adaptive risk to SL protection emergency threshold
+        sl_update_risk(risk_pct / 100)
+
         # Position sizing with live broker data
         sizing = calculate_position_size_with_broker_data(
             symbol, balance, risk_pct, sig["risk_points"],
@@ -1166,19 +1183,20 @@ class LiveTrader:
                     local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
                     local_now = utc_now.astimezone(local_tz).replace(tzinfo=None)
                     now_min = local_now.hour * 60 + local_now.minute
-                except Exception:
+                except Exception as tz_err:
+                    # C7 FIX: Fallback uses MT5 server time (EET) with MT5-specific hours
+                    logger.warning(f"Timezone fallback for {symbol}: {tz_err}")
                     mt5_tz = pytz.timezone("Europe/Helsinki")
-                    now = utc_now.astimezone(mt5_tz).replace(tzinfo=None)
-                    now_min = now.hour * 60 + now.minute
-                    # Fallback: use mt5 hours
-                    force_h = config.get("force_close_hour", config["mt5_close_hour"])
-                    force_m = config.get("force_close_minute", config["mt5_close_minute"])
-                    close_h = config["mt5_close_hour"]
-                    close_m = config["mt5_close_minute"]
-                    force_min = force_h * 60 + force_m
-                    close_min = close_h * 60 + close_m
+                    local_now = utc_now.astimezone(mt5_tz).replace(tzinfo=None)
+                    now_min = local_now.hour * 60 + local_now.minute
+                    # C7 FIX: Use mt5_ hours (already in server time) for both force-close and close
+                    force_h = config["mt5_close_hour"]
+                    force_m = config["mt5_close_minute"]
+                    # Force close 15 min before mt5 close
+                    force_min = (force_h * 60 + force_m) - 15
+                    close_min = force_h * 60 + force_m
                     if force_min <= now_min < close_min:
-                        logger.info(f"Force closing {ticket} ({symbol}) - session ending")
+                        logger.info(f"Force closing {ticket} ({symbol}) - session ending (fallback)")
                         ok = self.mt5.close_position(ticket)
                         if ok:
                             pnl = pos["profit"]
@@ -1188,7 +1206,8 @@ class LiveTrader:
                         else:
                             logger.error(f"FAILED to force-close {ticket} ({symbol})! "
                                          f"Retrying next cycle.")
-                    continue
+                    # C2 FIX: Do NOT continue here — let the rest of position management run
+                    # (BE moves, trailing SL, etc. still need to execute)
 
                 # Local timezone force-close times from config
                 force_h = config.get("force_close_hour", config["market_close_hour"])
