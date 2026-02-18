@@ -35,10 +35,10 @@ def show_banner():
     """Display startup banner"""
     print("""
     +==============================================================+
-    |         FUNDEDNEXT ORB TRADING BOT v2.0                     |
+    |         FUNDEDNEXT ORB TRADING BOT v2.1                     |
     |         --------------------------------                    |
     |         SPX500 | NDX100 | GER30 | US30                     |
-    |         15-min ORB | Pullback Retest | 2.5R TP              |
+    |         15-min ORB | Candidate #12 | 2.5R TP                |
     +==============================================================+
     """)
 

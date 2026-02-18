@@ -80,14 +80,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 2.0,     # Min SL distance for valid trade
         'max_sl_distance': 100.0,   # Max SL distance for valid trade
         
-        # ORB strategy params (locked from backtest)
+        # ORB strategy params (Candidate #12 — optimized for frequency)
         'orb_minutes': 15,
         'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.7,
-        'body_min': 0.65,
-        'close_strength': 0.30,
-        'breakout_margin': 0.10,
+        'disp_mult': 1.3,
+        'body_min': 0.60,
+        'close_strength': 0.25,
+        'breakout_margin': 0.05,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 2.0,
         'max_sl_points': 100.0,
@@ -121,14 +121,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 200.0,
         
-        # ORB strategy params (locked from backtest)
+        # ORB strategy params (Candidate #12 — optimized for frequency)
         'orb_minutes': 15,
         'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.7,
-        'body_min': 0.65,
-        'close_strength': 0.30,
-        'breakout_margin': 0.10,
+        'disp_mult': 1.3,
+        'body_min': 0.60,
+        'close_strength': 0.25,
+        'breakout_margin': 0.05,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 200.0,
@@ -167,14 +167,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 200.0,
         
-        # ORB strategy params (locked from backtest)
+        # ORB strategy params (Candidate #12 — optimized for frequency)
         'orb_minutes': 15,
         'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.7,
-        'body_min': 0.65,
-        'close_strength': 0.30,
-        'breakout_margin': 0.10,
+        'disp_mult': 1.3,
+        'body_min': 0.60,
+        'close_strength': 0.25,
+        'breakout_margin': 0.05,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 200.0,
@@ -207,14 +207,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 200.0,
         
-        # ORB strategy params (locked from backtest)
+        # ORB strategy params (Candidate #12 — optimized for frequency)
         'orb_minutes': 15,
         'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.7,
-        'body_min': 0.65,
-        'close_strength': 0.30,
-        'breakout_margin': 0.10,
+        'disp_mult': 1.3,
+        'body_min': 0.60,
+        'close_strength': 0.25,
+        'breakout_margin': 0.05,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 200.0,
