@@ -1412,11 +1412,11 @@ class LiveTrader:
                         )
                         self.telegram.system_status(
                             balance=account["balance"],
-                            equity=account["equity"],
+                            open_positions=len(self.tracked_positions),
+                            daily_pnl=self.state.daily_pnl,
                             daily_dd=dd["daily_dd"],
                             overall_dd=dd["overall_dd"],
-                            active_indices=active,
-                            open_positions=len(self.tracked_positions),
+                            active_markets=active,
                         )
                     last_hourly_status = datetime.now()
 
