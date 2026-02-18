@@ -68,6 +68,10 @@ class TelegramCommandHandler:
         self.on_status: Optional[Callable[[], Dict]] = None
         self.on_positions: Optional[Callable[[], list]] = None
         self.on_balance: Optional[Callable[[], Dict]] = None
+        self.on_trades: Optional[Callable[[], Dict]] = None
+        self.on_risk: Optional[Callable[[], Dict]] = None
+        self.on_performance: Optional[Callable[[], Dict]] = None
+        self.on_emergency: Optional[Callable[[], Dict]] = None
         
         # Bot state tracking
         self.bot_state = {
@@ -198,6 +202,21 @@ class TelegramCommandHandler:
         elif command in ['/help', '/help@bot', '/start', '/start@bot']:
             return self._handle_help()
         
+        elif command in ['/trades', '/trades@bot']:
+            return self._handle_trades()
+        
+        elif command in ['/risk', '/risk@bot']:
+            return self._handle_risk()
+        
+        elif command in ['/performance', '/performance@bot', '/perf', '/perf@bot']:
+            return self._handle_performance()
+        
+        elif command in ['/emergency', '/emergency@bot']:
+            return self._handle_emergency(first_name)
+        
+        elif command in ['/uptime', '/uptime@bot']:
+            return self._handle_uptime()
+        
         elif command.startswith('/'):
             return f"❓ Unknown command: {command}\n\nType /help for available commands."
         
@@ -280,24 +299,48 @@ Use /resume to continue trading.
         if self.on_status:
             try:
                 status_data = self.on_status()
-                if status_data:
+                if isinstance(status_data, dict) and 'error' not in status_data:
                     balance = status_data.get('balance', 0)
+                    equity = status_data.get('equity', 0)
                     daily_pnl = status_data.get('daily_pnl', 0)
                     open_pos = status_data.get('open_positions', 0)
                     daily_dd = status_data.get('daily_dd', 0)
                     overall_dd = status_data.get('overall_dd', 0)
                     active = status_data.get('active_markets', [])
+                    trades_today = status_data.get('trades_today', 0)
+                    tracked = status_data.get('tracked', 0)
+                    paused = status_data.get('paused', False)
+                    
+                    # DD warning indicators
+                    dd_warn = ""
+                    if overall_dd >= 6.0:
+                        dd_warn = " ⚠️ DANGER"
+                    elif overall_dd >= 4.0:
+                        dd_warn = " ⚠️"
+                    
+                    daily_dd_warn = ""
+                    if daily_dd >= 2.0:
+                        daily_dd_warn = " ⚠️ DANGER"
+                    elif daily_dd >= 1.5:
+                        daily_dd_warn = " ⚠️"
                     
                     extra_status = f"""
 <b>💰 Balance:</b> ${balance:,.2f}
+<b>💎 Equity:</b> ${equity:,.2f}
 <b>📈 Today's P&L:</b> ${daily_pnl:+,.2f}
-<b>📉 Daily DD:</b> {daily_dd:.2f}%
-<b>📉 Overall DD:</b> {overall_dd:.2f}%
-<b>📍 Open Positions:</b> {open_pos}
-<b>🌍 Active Markets:</b> {', '.join(active) if active else 'None'}
+<b>📉 Daily DD:</b> {daily_dd:.2f}%{daily_dd_warn}
+<b>📉 Overall DD:</b> {overall_dd:.2f}%{dd_warn}
+<b>📍 Open Positions:</b> {open_pos} (tracked: {tracked})
+<b>📊 Trades Today:</b> {trades_today}
+<b>🌍 Active Markets:</b> {', '.join(active) if active else 'None (markets closed)'}
 """
+                    if paused:
+                        extra_status += "\n⏸️ <b>Trading is PAUSED</b>\n"
+                elif isinstance(status_data, dict) and 'error' in status_data:
+                    extra_status = f"\n⚠️ {status_data['error']}\n"
             except Exception as e:
                 logger.error(f"Failed to get status: {e}")
+                extra_status = f"\n⚠️ Error getting live data: {e}\n"
         
         started_at = self.bot_state.get('started_at', 'N/A')
         last_cmd = self.bot_state.get('last_command', 'None')
@@ -322,7 +365,8 @@ Use /resume to continue trading.
                 if not positions:
                     return "📭 No open positions."
                 
-                msg = "<b>📊 OPEN POSITIONS</b>\n\n"
+                msg = f"<b>📊 OPEN POSITIONS ({len(positions)})</b>\n"
+                total_pnl = 0
                 
                 for pos in positions:
                     symbol = pos.get('symbol', 'Unknown')
@@ -330,17 +374,23 @@ Use /resume to continue trading.
                     lots = pos.get('volume', 0)
                     profit = pos.get('profit', 0)
                     entry = pos.get('price_open', 0)
-                    current = pos.get('price_current', 0)
+                    sl = pos.get('sl', 0)
+                    tp = pos.get('tp', 0)
+                    ticket = pos.get('ticket', 0)
+                    hit_be = pos.get('hit_be', False)
+                    total_pnl += profit
                     
                     emoji = "🟢" if profit >= 0 else "🔴"
+                    be_tag = " [BE]" if hit_be else ""
                     
                     msg += f"""
-{emoji} <b>{symbol}</b>
-   {direction} {lots} lots @ {entry:.2f}
-   Current: {current:.2f}
-   P&L: ${profit:+.2f}
+{emoji} <b>{symbol}</b> — {direction} {lots} lots{be_tag}
+   Entry: {entry:.2f} | SL: {sl:.2f} | TP: {tp:.2f}
+   P&L: <b>${profit:+.2f}</b> | #{ticket}
 """
                 
+                pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+                msg += f"\n{pnl_emoji} <b>Total Floating:</b> ${total_pnl:+,.2f}"
                 msg += f"\n⏰ {ist_time()}"
                 return msg
                 
@@ -356,18 +406,24 @@ Use /resume to continue trading.
             try:
                 data = self.on_balance()
                 
+                if 'error' in data:
+                    return f"❌ {data['error']}"
+                
                 balance = data.get('balance', 0)
                 equity = data.get('equity', 0)
                 margin = data.get('margin', 0)
                 free_margin = data.get('free_margin', 0)
                 profit = data.get('profit', 0)
                 
+                # Margin usage percentage
+                margin_pct = (margin / equity * 100) if equity > 0 else 0
+                
                 return f"""
 💰 <b>ACCOUNT BALANCE</b>
 
 <b>Balance:</b> ${balance:,.2f}
 <b>Equity:</b> ${equity:,.2f}
-<b>Margin Used:</b> ${margin:,.2f}
+<b>Margin Used:</b> ${margin:,.2f} ({margin_pct:.1f}%)
 <b>Free Margin:</b> ${free_margin:,.2f}
 <b>Floating P&L:</b> ${profit:+,.2f}
 
@@ -384,21 +440,257 @@ Use /resume to continue trading.
         return """
 📖 <b>AVAILABLE COMMANDS</b>
 
-<b>Trading Control:</b>
-/pause - Pause trading (bot keeps running)
-/resume - Resume trading
+<b>━━ Monitoring ━━</b>
+/status — Bot status, balance, DD, markets
+/positions — Open positions with P&L
+/balance — Account balance & equity
+/trades — Today's completed trades
+/risk — Drawdown & risk levels
+/performance — Weekly performance summary
+/uptime — Bot uptime info
 
-<b>Information:</b>
-/status - Get bot status
-/positions - Show open positions
-/balance - Show account balance
-/help - Show this help message
+<b>━━ Control ━━</b>
+/pause — Pause trading (keeps bot running)
+/resume — Resume trading
+/emergency — ⚠️ CLOSE ALL positions immediately
 
-<i>Bot start/stop is handled by Windows Task Scheduler</i>
+<b>━━ Info ━━</b>
+/help — Show this help message
+
+<i>Bot start/stop handled by Windows Task Scheduler</i>
 
 ━━━━━━━━━━━━━━━━━━
-<i>ICT Trading Bot v1.0</i>
+<i>ORB Trading Bot v2.1</i>
 """
+    
+    def _handle_trades(self) -> str:
+        """Handle /trades command - show today's completed trades"""
+        if self.on_trades:
+            try:
+                data = self.on_trades()
+                if not data or data.get('trades', 0) == 0:
+                    return f"📭 <b>No trades today</b>\n\n⏰ {ist_time()}"
+                
+                trades = data.get('trades', 0)
+                wins = data.get('wins', 0)
+                losses = data.get('losses', 0)
+                win_rate = data.get('win_rate', 0)
+                pnl = data.get('gross_pnl', 0)
+                best = data.get('best_trade', 0)
+                worst = data.get('worst_trade', 0)
+                details = data.get('trade_details', [])
+                
+                pnl_emoji = "📈" if pnl >= 0 else "📉"
+                
+                msg = f"""
+{pnl_emoji} <b>TODAY'S TRADES</b>
+
+<b>Trades:</b> {trades} ({wins}W / {losses}L)
+<b>Win Rate:</b> {win_rate:.0f}%
+<b>Total P&L:</b> ${pnl:+,.2f}
+<b>Best:</b> ${best:+,.2f}
+<b>Worst:</b> ${worst:+,.2f}
+"""
+                # Show individual trades
+                if details:
+                    msg += "\n<b>Details:</b>\n"
+                    for t in details:
+                        icon = "✅" if t.get('pnl', 0) > 0 else "❌"
+                        msg += f"  {icon} {t.get('symbol', '?')} {t.get('direction', '?')} → ${t.get('pnl', 0):+,.2f} ({t.get('exit_reason', '?')})\n"
+                
+                msg += f"\n⏰ {ist_time()}"
+                return msg
+            except Exception as e:
+                logger.error(f"Failed to get trades: {e}")
+                return f"❌ Failed to get trades: {e}"
+        return "⚠️ Trades callback not configured."
+    
+    def _handle_risk(self) -> str:
+        """Handle /risk command - show drawdown and risk info"""
+        if self.on_risk:
+            try:
+                data = self.on_risk()
+                if 'error' in data:
+                    return f"❌ {data['error']}"
+                
+                balance = data.get('balance', 0)
+                initial = data.get('initial_balance', 0)
+                daily_dd = data.get('daily_dd', 0)
+                overall_dd = data.get('overall_dd', 0)
+                daily_limit = data.get('daily_dd_limit', 3.0)
+                overall_limit = data.get('overall_dd_limit', 8.0)
+                can_trade = data.get('can_trade', True)
+                risk_pct = data.get('risk_percent', 0)
+                risk_dollars = data.get('risk_dollars', 0)
+                daily_pnl = data.get('daily_pnl', 0)
+                daily_trades = data.get('daily_trades', 0)
+                paused = data.get('paused', False)
+                
+                # Progress bars
+                daily_bar = self._progress_bar(daily_dd, daily_limit)
+                overall_bar = self._progress_bar(overall_dd, overall_limit)
+                
+                status = "🟢 CAN TRADE" if can_trade and not paused else "🔴 BLOCKED"
+                if paused:
+                    status = "⏸️ PAUSED"
+                
+                return f"""
+🛡️ <b>RISK & DRAWDOWN</b>
+
+<b>Status:</b> {status}
+
+<b>📉 Daily DD:</b> {daily_dd:.2f}% / {daily_limit:.1f}%
+{daily_bar}
+
+<b>📉 Overall DD:</b> {overall_dd:.2f}% / {overall_limit:.1f}%
+{overall_bar}
+
+<b>💰 Balance:</b> ${balance:,.2f}
+<b>🏦 Initial:</b> ${initial:,.2f}
+<b>📈 Today P&L:</b> ${daily_pnl:+,.2f}
+<b>📊 Trades Today:</b> {daily_trades}
+
+<b>⚡ Risk Per Trade:</b> {risk_pct:.1f}% = ${risk_dollars:,.2f}
+
+⏰ {ist_time()}
+"""
+            except Exception as e:
+                logger.error(f"Failed to get risk: {e}")
+                return f"❌ Failed to get risk info: {e}"
+        return "⚠️ Risk callback not configured."
+    
+    def _handle_performance(self) -> str:
+        """Handle /performance command - weekly summary"""
+        if self.on_performance:
+            try:
+                data = self.on_performance()
+                if 'error' in data:
+                    return f"❌ {data['error']}"
+                
+                daily = data.get('daily', {})
+                weekly = data.get('weekly', {})
+                balance = data.get('balance', 0)
+                initial = data.get('initial_balance', 0)
+                total_return = data.get('total_return_pct', 0)
+                
+                d_trades = daily.get('trades', 0)
+                d_pnl = daily.get('gross_pnl', 0)
+                d_wr = daily.get('win_rate', 0)
+                
+                w_trades = weekly.get('trades', 0)
+                w_pnl = weekly.get('gross_pnl', 0)
+                w_wr = weekly.get('win_rate', 0)
+                w_avg = weekly.get('avg_trade', 0)
+                w_start = weekly.get('week_start', '?')
+                w_end = weekly.get('week_end', '?')
+                
+                return_emoji = "📈" if total_return >= 0 else "📉"
+                
+                return f"""
+📊 <b>PERFORMANCE SUMMARY</b>
+
+<b>━━ Today ━━</b>
+Trades: {d_trades} | WR: {d_wr:.0f}% | P&L: ${d_pnl:+,.2f}
+
+<b>━━ This Week ({w_start} to {w_end}) ━━</b>
+Trades: {w_trades} | WR: {w_wr:.0f}% | P&L: ${w_pnl:+,.2f}
+Avg Trade: ${w_avg:+,.2f}
+
+<b>━━ Overall ━━</b>
+{return_emoji} Balance: ${balance:,.2f}
+Initial: ${initial:,.2f}
+Return: {total_return:+.2f}%
+
+⏰ {ist_time()}
+"""
+            except Exception as e:
+                logger.error(f"Failed to get performance: {e}")
+                return f"❌ Failed to get performance: {e}"
+        return "⚠️ Performance callback not configured."
+    
+    def _handle_emergency(self, user_name: str) -> str:
+        """Handle /emergency command - close all positions"""
+        if self.on_emergency:
+            try:
+                result = self.on_emergency()
+                if 'error' in result:
+                    return f"❌ Emergency close failed: {result['error']}"
+                
+                closed = result.get('closed', 0)
+                failed = result.get('failed', 0)
+                total = result.get('total', 0)
+                
+                if total == 0:
+                    return "📭 No open positions to close."
+                
+                return f"""
+🚨 <b>EMERGENCY CLOSE EXECUTED</b>
+
+<b>By:</b> {user_name}
+<b>Closed:</b> {closed}/{total}
+<b>Failed:</b> {failed}
+
+⏸️ Trading has been PAUSED.
+Use /resume to continue trading.
+
+⏰ {ist_time()}
+"""
+            except Exception as e:
+                logger.error(f"Emergency close failed: {e}")
+                return f"❌ Emergency close failed: {e}"
+        return "⚠️ Emergency callback not configured."
+    
+    def _handle_uptime(self) -> str:
+        """Handle /uptime command"""
+        started_at = self.bot_state.get('started_at', None)
+        if started_at:
+            try:
+                # Parse the stored start time
+                start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S IST')
+                now = get_ist_now().replace(tzinfo=None)
+                uptime = now - start_dt
+                
+                hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                
+                return f"""
+⏱️ <b>UPTIME</b>
+
+<b>Started:</b> {started_at}
+<b>Uptime:</b> {hours}h {minutes}m {seconds}s
+<b>Status:</b> {'🟢 Running' if self.bot_state['is_running'] else '🔴 Stopped'}
+
+⏰ {ist_time()}
+"""
+            except Exception:
+                pass
+        
+        return f"""
+⏱️ <b>UPTIME</b>
+
+<b>Started:</b> {started_at or 'Unknown'}
+<b>Status:</b> {'🟢 Running' if self.bot_state['is_running'] else '🔴 Stopped'}
+
+⏰ {ist_time()}
+"""
+    
+    @staticmethod
+    def _progress_bar(current: float, limit: float, length: int = 10) -> str:
+        """Create a text progress bar for DD visualization"""
+        if limit <= 0:
+            return ""
+        ratio = min(current / limit, 1.0)
+        filled = int(ratio * length)
+        empty = length - filled
+        
+        if ratio >= 0.8:
+            bar_char = "🟥"
+        elif ratio >= 0.5:
+            bar_char = "🟨"
+        else:
+            bar_char = "🟩"
+        
+        return bar_char * filled + "⬜" * empty + f" ({ratio*100:.0f}%)"
     
     def start_polling(self):
         """Start the polling thread to listen for commands"""

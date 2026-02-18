@@ -50,7 +50,7 @@ from config_fundednext import (
 )
 from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
-from telegram_commands import TelegramCommandHandler
+from telegram_commands import TelegramCommandHandler, ist_time
 from trade_journal import TradeJournal, ReportScheduler
 from sl_protection import (
     set_telegram_config as sl_set_telegram,
@@ -371,6 +371,7 @@ class MT5Connector:
                 "type": "buy" if p.type == mt5.POSITION_TYPE_BUY else "sell",
                 "volume": p.volume,
                 "price": p.price_open,
+                "price_current": p.price_current,
                 "sl": p.sl,
                 "tp": p.tp,
                 "profit": p.profit,
@@ -520,6 +521,8 @@ class LiveTrader:
             sl_stop_monitoring()
             self._save_state()
             if hasattr(self, "cmd_handler"):
+                self.cmd_handler.bot_state['is_running'] = False
+                self.cmd_handler._save_state()
                 self.cmd_handler.stop_polling()
             account = self.mt5.get_account_info()
             if account:
@@ -637,6 +640,10 @@ class LiveTrader:
         self.cmd_handler.on_status = self._on_status
         self.cmd_handler.on_positions = self._on_positions
         self.cmd_handler.on_balance = self._on_balance
+        self.cmd_handler.on_trades = self._on_trades
+        self.cmd_handler.on_risk = self._on_risk
+        self.cmd_handler.on_performance = self._on_performance
+        self.cmd_handler.on_emergency = self._on_emergency
 
     def _on_start(self, *a, **kw):
         self._trading_enabled = True
@@ -657,36 +664,141 @@ class LiveTrader:
         self._trading_paused = False
         logger.info("Trading RESUMED via Telegram")
 
-    def _on_status(self, *a, **kw):
+    def _on_status(self, *a, **kw) -> dict:
+        """Return status dict for Telegram /status command."""
         account = self.mt5.get_account_info()
         if not account:
-            return "Not connected"
+            return {'balance': 0, 'daily_pnl': 0, 'open_positions': 0,
+                    'daily_dd': 0, 'overall_dd': 0, 'active_markets': [],
+                    'error': 'Not connected to MT5'}
         dd = self.dd_protection.update(account["balance"]) if self.dd_protection else {}
         active = get_active_indices()
-        return (f"Balance: ${account['balance']:,.2f}\n"
-                f"Equity: ${account['equity']:,.2f}\n"
-                f"Daily DD: {dd.get('daily_dd', 0):.2f}%\n"
-                f"Overall DD: {dd.get('overall_dd', 0):.2f}%\n"
-                f"Active markets: {active}\n"
-                f"Tracked positions: {len(self.tracked_positions)}\n"
-                f"Trades today: {self.state.daily_trades}")
+        positions = self.mt5.get_open_positions()
+        return {
+            'balance': account.get('balance', 0),
+            'equity': account.get('equity', 0),
+            'daily_pnl': self.state.daily_pnl,
+            'open_positions': len(positions) if positions else 0,
+            'daily_dd': dd.get('daily_dd', 0),
+            'overall_dd': dd.get('overall_dd', 0),
+            'active_markets': active,
+            'trades_today': self.state.daily_trades,
+            'tracked': len(self.tracked_positions),
+            'paused': self._trading_paused,
+        }
 
-    def _on_positions(self, *a, **kw):
+    def _on_positions(self, *a, **kw) -> list:
+        """Return positions list for Telegram /positions command."""
         positions = self.mt5.get_open_positions()
         if not positions:
-            return "No open positions"
-        lines = []
+            return []
+        result = []
         for p in positions:
-            icon = "+" if p["profit"] > 0 else "-"
-            lines.append(f"[{icon}] {p['symbol']} {p['type'].upper()} "
-                         f"{p['volume']} lots | P&L: ${p['profit']:,.2f}")
-        return "\n".join(lines)
+            # Enrich with tracked data if available
+            tracked = self.tracked_positions.get(p["ticket"], {})
+            result.append({
+                'symbol': p['symbol'],
+                'type': p['type'].upper(),
+                'volume': p['volume'],
+                'profit': p['profit'],
+                'price_open': p['price'],
+                'price_current': p.get('price_current', p['price']),
+                'sl': p.get('sl', 0),
+                'tp': p.get('tp', 0),
+                'ticket': p['ticket'],
+                'entry_time': str(p.get('time', '')),
+                'hit_be': tracked.get('hit_be', False),
+            })
+        return result
 
-    def _on_balance(self, *a, **kw):
+    def _on_balance(self, *a, **kw) -> dict:
+        """Return balance dict for Telegram /balance command."""
         account = self.mt5.get_account_info()
         if not account:
-            return "Not connected"
-        return f"Balance: ${account['balance']:,.2f}\nEquity: ${account['equity']:,.2f}"
+            return {'balance': 0, 'equity': 0, 'margin': 0,
+                    'free_margin': 0, 'profit': 0, 'error': 'Not connected'}
+        return {
+            'balance': account.get('balance', 0),
+            'equity': account.get('equity', 0),
+            'margin': account.get('margin', 0),
+            'free_margin': account.get('free_margin', 0),
+            'profit': account.get('profit', 0),
+        }
+
+    def _on_trades(self, *a, **kw) -> dict:
+        """Return today's trades for Telegram /trades command."""
+        try:
+            stats = self.journal.get_daily_stats()
+            return stats
+        except Exception as e:
+            logger.error(f"Failed to get trades: {e}")
+            return {'trades': 0, 'error': str(e)}
+
+    def _on_risk(self, *a, **kw) -> dict:
+        """Return risk/DD info for Telegram /risk command."""
+        account = self.mt5.get_account_info()
+        if not account:
+            return {'error': 'Not connected'}
+        balance = account.get('balance', 0)
+        dd = self.dd_protection.update(balance) if self.dd_protection else {}
+        risk_pct = self.dd_protection.get_adaptive_risk(balance) if self.dd_protection else 0
+        return {
+            'balance': balance,
+            'initial_balance': self.dd_protection.initial_balance if self.dd_protection else ACCOUNT_SIZE,
+            'daily_dd': dd.get('daily_dd', 0),
+            'overall_dd': dd.get('overall_dd', 0),
+            'daily_dd_limit': FUNDEDNEXT_RULES.get('daily_drawdown_stop', 3.0),
+            'overall_dd_limit': FUNDEDNEXT_RULES.get('max_drawdown_percent', 8.0),
+            'can_trade': dd.get('can_trade', True),
+            'risk_percent': risk_pct,
+            'risk_dollars': balance * risk_pct / 100,
+            'daily_pnl': self.state.daily_pnl,
+            'daily_trades': self.state.daily_trades,
+            'paused': self._trading_paused,
+        }
+
+    def _on_performance(self, *a, **kw) -> dict:
+        """Return weekly performance for Telegram /performance command."""
+        try:
+            daily = self.journal.get_daily_stats()
+            weekly = self.journal.get_weekly_stats()
+            account = self.mt5.get_account_info()
+            balance = account.get('balance', 0) if account else 0
+            initial = self.dd_protection.initial_balance if self.dd_protection else ACCOUNT_SIZE
+            return {
+                'daily': daily,
+                'weekly': weekly,
+                'balance': balance,
+                'initial_balance': initial,
+                'total_return_pct': ((balance - initial) / initial * 100) if initial else 0,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get performance: {e}")
+            return {'error': str(e)}
+
+    def _on_emergency(self, *a, **kw) -> dict:
+        """Emergency close all positions via Telegram /emergency command."""
+        try:
+            positions = self.mt5.get_open_positions()
+            if not positions:
+                return {'closed': 0, 'message': 'No open positions to close'}
+            closed = 0
+            failed = 0
+            for p in positions:
+                ok = self.mt5.close_position(p['ticket'])
+                if ok:
+                    closed += 1
+                    logger.warning(f"EMERGENCY CLOSE: {p['symbol']} ticket {p['ticket']}")
+                else:
+                    failed += 1
+            self._trading_paused = True
+            self.telegram.critical_alert("EMERGENCY CLOSE",
+                f"All positions closed via Telegram command.\n"
+                f"Closed: {closed}, Failed: {failed}\nTrading PAUSED.")
+            return {'closed': closed, 'failed': failed, 'total': len(positions)}
+        except Exception as e:
+            logger.error(f"Emergency close failed: {e}")
+            return {'error': str(e)}
 
     # ────────────────────────────────────────────────────────────────────
     #  Heartbeat (for watchdog)
@@ -747,6 +859,9 @@ class LiveTrader:
         logger.info("SL Protection monitoring started")
 
         self.cmd_handler.start_polling()
+        self.cmd_handler.bot_state['is_running'] = True
+        self.cmd_handler.bot_state['started_at'] = ist_time()
+        self.cmd_handler._save_state()
         logger.info("Telegram command handler started - use /help for commands")
 
         self.telegram.bot_started(list(PROFITABLE_INDICES.keys()), balance)
