@@ -24,9 +24,14 @@ import logging
 import threading
 import requests
 import sys
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 from pathlib import Path
+
+# Load .env for config values
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / '.env')
 
 # ============================================================================
 # CONFIGURATION CONSTANTS
@@ -34,14 +39,30 @@ from pathlib import Path
 
 SL_VERIFICATION_DELAY = 2  # seconds to wait after order
 SL_VERIFICATION_ATTEMPTS = 3  # max retry attempts
-SL_TOLERANCE_POINTS = 5  # acceptable SL deviation
+SL_TOLERANCE_PERCENT = 0.10  # 10% of SL distance is acceptable deviation
+SL_TOLERANCE_MIN = 1.0  # minimum tolerance in points
+SL_TOLERANCE_MAX = 20.0  # maximum tolerance in points
 EMERGENCY_LOSS_MULTIPLIER = 1.3  # close at 130% of intended risk
 EMERGENCY_PAUSE_MINUTES = 15  # pause duration after emergency
 POSITION_MONITOR_INTERVAL = 10  # check positions every 10 seconds
 CONNECTION_MONITOR_INTERVAL = 30  # check connection every 30 seconds
 ORDER_DEVIATION_POINTS = 20  # max slippage allowed
-RISK_PER_TRADE = 0.015  # 1.5% risk per trade
+RISK_PER_TRADE = float(os.environ.get('RISK_PER_TRADE', '1.5')) / 100  # convert % to decimal
 FAILED_CLOSE_REMINDER_INTERVAL = 120  # remind every 2 minutes for failed closes
+
+
+def get_sl_tolerance(entry_price: float, expected_sl: float) -> float:
+    """
+    Calculate proportional SL tolerance based on SL distance.
+    10% of SL distance, clamped to [SL_TOLERANCE_MIN, SL_TOLERANCE_MAX].
+    
+    For SPX500 (SL ~10-20 pts): tolerance = 1-2 pts
+    For US30 (SL ~30-50 pts): tolerance = 3-5 pts
+    For GER30 (SL ~20-40 pts): tolerance = 2-4 pts
+    """
+    sl_distance = abs(entry_price - expected_sl)
+    tolerance = sl_distance * SL_TOLERANCE_PERCENT
+    return max(SL_TOLERANCE_MIN, min(SL_TOLERANCE_MAX, tolerance))
 
 # ============================================================================
 # GLOBAL STATE VARIABLES
@@ -373,8 +394,8 @@ def verify_sl_after_entry(ticket: int, expected_sl: float, expected_tp: float, s
                         emergency_close_position(ticket, "SL verification failed after max retries")
                         return False
             
-            # Check SL deviation
-            elif abs(position.sl - expected_sl) > SL_TOLERANCE_POINTS:
+            # Check SL deviation (proportional tolerance based on SL distance)
+            elif abs(position.sl - expected_sl) > get_sl_tolerance(position.price_open, expected_sl):
                 if logger:
                     logger.warning(f"SL deviation detected: expected {expected_sl}, actual {position.sl}")
                 
@@ -495,7 +516,7 @@ def emergency_close_position(ticket: int, reason: str) -> bool:
             "position": ticket,
             "price": price,
             "deviation": ORDER_DEVIATION_POINTS,
-            "magic": 234000,
+            "magic": 20260218,
             "comment": f"Emergency: {reason[:30]}",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
@@ -715,11 +736,12 @@ def monitor_open_positions() -> None:
                     emergency_close_position(ticket, f"Loss exceeded limit (${profit:.2f})")
                     continue
                 
-                # CHECK 3: SL hasn't moved unexpectedly
+                # CHECK 3: SL hasn't moved unexpectedly (use proportional tolerance)
                 expected_sl = get_original_sl(ticket)
                 if expected_sl is not None:
+                    tolerance = get_sl_tolerance(position.price_open, expected_sl)
                     sl_deviation = abs(current_sl - expected_sl)
-                    if sl_deviation > 10:  # More than 10 points deviation
+                    if sl_deviation > tolerance:
                         if logger:
                             logger.warning(f"SL MOVED UNEXPECTEDLY: {symbol} from {expected_sl} to {current_sl}")
                         
@@ -1084,7 +1106,10 @@ __all__ = [
     # Constants
     'SL_VERIFICATION_DELAY',
     'SL_VERIFICATION_ATTEMPTS',
-    'SL_TOLERANCE_POINTS',
+    'SL_TOLERANCE_PERCENT',
+    'SL_TOLERANCE_MIN',
+    'SL_TOLERANCE_MAX',
+    'get_sl_tolerance',
     'EMERGENCY_LOSS_MULTIPLIER',
     'EMERGENCY_PAUSE_MINUTES',
     'FAILED_CLOSE_REMINDER_INTERVAL',

@@ -75,10 +75,22 @@ PROFITABLE_INDICES = {
         'tick_size': 0.01,
         'tick_value': 0.01,         # $ per tick per lot
         'currency': 'USD',
-        'point_value': 1.0,         # $ per point per lot
+        'point_value': 1.0,         # $ per point per lot (fallback; live uses broker data)
         'sl_buffer': 1.0,           # SL buffer in points
         'min_sl_distance': 2.0,     # Min SL distance for valid trade
-        'max_sl_distance': 25.0,    # Max SL distance for valid trade
+        'max_sl_distance': 100.0,   # Max SL distance for valid trade
+        
+        # ORB strategy params (locked from backtest)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.7,
+        'body_min': 0.65,
+        'close_strength': 0.30,
+        'breakout_margin': 0.10,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 2.0,
+        'max_sl_points': 100.0,
         
         # Trading Hours (Local market time)
         'market_open_hour': 9,
@@ -105,9 +117,21 @@ PROFITABLE_INDICES = {
         'tick_value': 0.01,
         'currency': 'EUR',
         'point_value': 1.0,
-        'sl_buffer': 2.0,           # Buffer for ~24000 index
-        'min_sl_distance': 2.0,
-        'max_sl_distance': 25.0,
+        'sl_buffer': 5.0,           # Buffer for ~24000 index (matched to backtest)
+        'min_sl_distance': 10.0,
+        'max_sl_distance': 200.0,
+        
+        # ORB strategy params (locked from backtest)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.7,
+        'body_min': 0.65,
+        'close_strength': 0.30,
+        'breakout_margin': 0.10,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 10.0,
+        'max_sl_points': 200.0,
         
         'market_open_hour': 9,
         'market_open_minute': 0,
@@ -125,35 +149,51 @@ PROFITABLE_INDICES = {
         'timezone': 'Europe/Berlin',
     },
     
-    'FRA40': {
-        'symbol': 'FRA40',
-        'description': 'CAC 40 CFD',
-        'contract_size': 10,
-        'tick_size': 0.01,
-        'tick_value': 0.01,
-        'currency': 'EUR',
-        'point_value': 1.0,
-        'sl_buffer': 1.0,           # Buffer for ~8000 index
-        'min_sl_distance': 2.0,
-        'max_sl_distance': 25.0,
-        
-        'market_open_hour': 9,
-        'market_open_minute': 0,
-        'market_close_hour': 17,
-        'market_close_minute': 30,
-        'force_close_hour': 17,
-        'force_close_minute': 15,
-        
-        'mt5_open_hour': 10,
-        'mt5_open_minute': 0,
-        'mt5_close_hour': 18,
-        'mt5_close_minute': 30,
-        
-        'timezone': 'Europe/Paris',
-    },
+    # FRA40 removed - not backtested with ORB strategy
+    # 'FRA40': { ... },
     
     # HK50 removed - negative P&L after costs in 1-year backtest (-$4,018)
     # 'HK50': { ... },
+    
+    'NDX100': {
+        'symbol': 'NDX100',
+        'description': 'Nasdaq 100 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'USD',
+        'point_value': 1.0,
+        'sl_buffer': 5.0,
+        'min_sl_distance': 10.0,
+        'max_sl_distance': 200.0,
+        
+        # ORB strategy params (locked from backtest)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.7,
+        'body_min': 0.65,
+        'close_strength': 0.30,
+        'breakout_margin': 0.10,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 10.0,
+        'max_sl_points': 200.0,
+        
+        'market_open_hour': 9,
+        'market_open_minute': 30,
+        'market_close_hour': 16,
+        'market_close_minute': 0,
+        'force_close_hour': 15,
+        'force_close_minute': 45,
+        
+        # MT5 Time (EET/EEST - same as SPX500)
+        'mt5_open_hour': 16,
+        'mt5_open_minute': 30,
+        'mt5_close_hour': 23,
+        'mt5_close_minute': 0,
+        
+        'timezone': 'America/New_York',
+    },
     
     'US30': {
         'symbol': 'US30',
@@ -164,8 +204,20 @@ PROFITABLE_INDICES = {
         'currency': 'USD',
         'point_value': 1.0,
         'sl_buffer': 5.0,           # Dow has larger point movements
-        'min_sl_distance': 5.0,
-        'max_sl_distance': 50.0,
+        'min_sl_distance': 10.0,
+        'max_sl_distance': 200.0,
+        
+        # ORB strategy params (locked from backtest)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.7,
+        'body_min': 0.65,
+        'close_strength': 0.30,
+        'breakout_margin': 0.10,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 10.0,
+        'max_sl_points': 200.0,
         
         'market_open_hour': 9,
         'market_open_minute': 30,

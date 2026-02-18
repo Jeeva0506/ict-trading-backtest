@@ -51,14 +51,12 @@ class EconomicCalendar:
         ]
     }
     
-    # Symbol to currency mapping
+    # Symbol to currency mapping — only backtested indices
     SYMBOL_CURRENCIES = {
         'SPX500': ['USD'],
+        'NDX100': ['USD'],
+        'US30': ['USD'],
         'GER30': ['EUR', 'USD'],  # Also affected by USD news
-        'FRA40': ['EUR', 'USD'],
-        'HK50': ['HKD', 'CNY', 'USD'],  # China news affects HK
-        'UK100': ['GBP', 'USD'],
-        'JP225': ['JPY', 'USD'],
     }
     
     def __init__(self, buffer_minutes: int = 30, cache_minutes: int = 15):

@@ -1,9 +1,10 @@
 @echo off
-:: Start ICT Live Trading Bot with Watchdog
+:: Start ORB Live Trading Bot with Watchdog
 :: Run this script to start automated live trading (runs continuously)
 
 echo ================================================
-echo    ICT Trading Bot - Starting with Watchdog...
+echo    ORB Trading Bot - Starting with Watchdog...
+echo    SPX500 / NDX100 / GER30 / US30
 echo ================================================
 echo.
 echo This runs CONTINUOUSLY until you close the window.

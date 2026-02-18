@@ -1,3 +1,7 @@
+# ============================================================================
+# FundedNext ORB Trading Bot — .gitignore
+# ============================================================================
+
 # Environment files (contain secrets)
 .env
 .env.local
@@ -10,26 +14,14 @@ __pycache__/
 *.so
 .Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
 
 # Virtual environments
 .venv/
 venv/
 ENV/
-env/
 
 # IDE
 .vscode/
@@ -42,16 +34,20 @@ env/
 *.log
 live/logs/
 
-# Data files (large CSV files)
+# Data files (large CSV files — re-fetch from MT5 if needed)
 data/raw/*.csv
 
-# Generated reports
+# Generated reports (re-run backtest to regenerate)
 reports/ict_clean/
 reports/ict_clean_*/
 reports/screenshots/
+reports/charts/
 
 # Trade journal (live trade data)
 live/reports/
+
+# Archive (old scripts and data)
+archive/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -59,3 +55,9 @@ live/reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test artifacts
+live/logs/position_state.json
+live/logs/heartbeat.txt
+live/logs/watchdog.lock
+live/logs/news_cache.json

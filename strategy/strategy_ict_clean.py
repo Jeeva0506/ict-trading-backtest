@@ -1,13 +1,17 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Any, Dict
+from typing import Any, List, Optional, Dict
 import pandas as pd
-from .utils import find_swing_highs_lows, aggregate_1m_to_3m
 
 
 @dataclass
 class TradeSignalICT:
-    direction: str
+    """
+    Compatibility dataclass used by backtest_live_setup.py.
+    We keep the same fields so you can swap this file without changing the runner.
+    """
+    direction: str                 # "bullish" or "bearish"
     entry_time: Any
     entry_price: float
     stop_loss: float
@@ -18,372 +22,472 @@ class TradeSignalICT:
 
     exit_time: Any = None
     exit_price: float = None
-    exit_reason: str = None
-    pnl_points: float = 0.0
+    exit_reason: str = None        # TP, SL_BE, SL_HIT, SESSION_CLOSE
+    pnl_points: float = 0.0        # realized PnL in points
 
 
 class StrategyICTClean:
+    """
+    === ORB Clean Breakout — Single Target (Universal Index) ===
+
+    Design targets: 50% WR, PF ≥ 2.5, RR = 1:2.5, ≥ 3 trades/week
+
+    Math:  50% × 2.5R = 1.25R avg / trade
+           With BE + lock exits: PF = (50×2.5) / (50×1) = 2.5
+
+    Research-backed improvements (Quantocracy / CrackingMarkets / SSRN / HowToTrade):
+    1. Volatility contraction filter: trade breakouts ONLY after narrow ORB
+       (coiled spring). 3x per-trade expectancy in research.
+    2. Pure BE + TP system: move SL to entry at 1R, let trade run to 2.5R TP.
+       No trail, no lock — maximum chance of reaching full target.
+    3. HTF EMA trend filter (50/200 EMA on H1): only trade breakouts
+       in the direction of the dominant trend (HowToTrade article).
+    4. Pullback retest entry: wait for price to retest ORB level after breakout.
+       Tighter SL from retest candle → higher RR → more achievable TP.
+
+    Rules:
+    - ORB = first `orb_minutes` from session start.
+    - Breakout candle CLOSE beyond ORB high/low within breakout window.
+    - Filters:
+        * Narrow ORB (volatility contraction): ORB range < median of ORB candle ranges × num_candles × contraction_mult
+        * Displacement >= disp_mult x avg range (clean impulsive candle)
+        * Body% >= body_min (decisive, not doji)
+        * Close strength in direction (close in upper/lower portion of candle)
+        * Close must exceed ORB level by breakout_margin x ORB range
+        * HTF trend alignment (50/200 EMA on H1, fallback: ORB bias)
+        * Pullback retest: enter on confirmed retest of ORB level (tighter SL)
+    - SL = retest candle extreme +/- buffer (or breakout candle if no pullback).
+    - Single TP at 2.5R. No partials.
+    - SL moves to BE when price reaches 1R in profit.
+    - Force close 15 min before session end.
+    - 1 trade per day per instrument.
+    """
+
     def __init__(
         self,
-        sl_buffer=1.0,
-        bos_required=2,
-        swing_lookback=5,
-        pullback_min_opposite_candles=3,
-        ob2_retracement=0.65,
-        min_sl_points=2.0,
-        max_sl_points=25.0,
-        debug=False,
+        sl_buffer: float = 1.0,
+        bos_required: int = 2,                     # kept for signature compat
+        swing_lookback: int = 5,                   # kept for signature compat
+        pullback_min_opposite_candles: int = 3,    # kept for signature compat
+        ob2_retracement: float = 0.65,             # kept for signature compat
+        min_sl_points: float = 2.0,
+        max_sl_points: float = 10_000.0,
+        debug: bool = False,
+        # --- ORB settings ---
+        orb_minutes: int = 15,
+        entry_hours: int = 3,
+        breakout_window_minutes: int = 60,
+        lookback_ranges: int = 10,
+        disp_mult: float = 1.7,
+        vol_mult: float = 1.0,                     # kept for compat, not used
+        body_min: float = 0.65,
+        close_strength: float = 0.30,              # close must be in top/bottom X of candle
+        breakout_margin: float = 0.10,             # close must exceed ORB by X * orb_range
+        orb_range_min_mult: float = 0.5,           # min ORB range vs avg ORB candle range
+        # --- exits ---
+        tp1_r: float = 1.0,                        # BE trigger level
+        tp2_r: float = 2.5,                        # kept for compat, unused
+        tp3_r: float = 2.5,                        # actual TP target
+        tp2_partial: float = 1/3,                  # kept for compat, unused
+        trail_buffer: Optional[float] = None,      # kept for compat
+        trail_window: int = 3,                     # kept for compat
     ):
-        self.sl_buffer = sl_buffer
-        self.bos_required = bos_required
-        self.swing_lookback = swing_lookback
-        self.pullback_min = pullback_min_opposite_candles
-        self.ob2_retracement = ob2_retracement
-        self.min_sl = min_sl_points
-        self.max_sl = max_sl_points
-        self.debug = debug
+        self.sl_buffer = float(sl_buffer)
+        self.min_sl = float(min_sl_points)
+        self.max_sl = float(max_sl_points)
+        self.debug = bool(debug)
 
-        self.debug_rows = []
-        self._reset()
+        self.orb_minutes = int(orb_minutes)
+        self.entry_hours = int(entry_hours)
+        self.breakout_window_minutes = int(breakout_window_minutes)
+        self.lookback_ranges = int(lookback_ranges)
 
-    # -----------------------------------------------------
+        self.disp_mult = float(disp_mult)
+        self.body_min = float(body_min)
+        self.close_strength = float(close_strength)
+        self.breakout_margin = float(breakout_margin)
+        self.orb_range_min_mult = float(orb_range_min_mult)
 
-    def _reset(self):
-        self.trend = None
-        self.bull_bos = 0
-        self.bear_bos = 0
+        # Single target system
+        self.be_trigger_r = float(tp1_r)       # move SL to BE at this R
+        self.tp_r = float(tp3_r)               # single TP target
 
-        self.sweep_active = False
-        self.pullback_start = None
-        self.pullback_end = None
+        # compat fields (unused internally)
+        self.tp1_r = float(tp1_r)
+        self.tp2_r = float(tp2_r)
+        self.tp3_r = float(tp3_r)
+        self.tp2_partial = float(tp2_partial)
+        self.vol_mult = float(vol_mult)
+        self.trail_buffer = float(trail_buffer) if trail_buffer is not None else float(sl_buffer)
+        self.trail_window = int(trail_window)
 
-        self.ob1 = None
-        self.ob1_touch_idx = None
-        self.ob1_touch_price = None
+        self.debug_rows: List[Dict[str, Any]] = []
 
-        self.choch = False
-        self.choch_idx = None
-
-        self.waiting_entry = False
-        self.trade_taken = False
-        self.trade = None
-
-        self.tp1 = False
-        self.tp2 = False
-        self.position = 1.0
-
-    # -----------------------------------------------------
+    # ----------------- helpers -----------------
 
     def _log(self, **k):
         if self.debug:
             self.debug_rows.append(k)
 
-    # -----------------------------------------------------
+    @staticmethod
+    def _body_pct(r) -> float:
+        rng = float(r.high) - float(r.low)
+        if rng <= 0:
+            return 0.0
+        return abs(float(r.close) - float(r.open)) / rng
 
-    def _bull(self, r):
-        return r.close > r.open
+    # ----------------- trade simulation -----------------
 
-    def _bear(self, r):
-        return r.close < r.open
+    def _simulate_trade(
+        self,
+        df: pd.DataFrame,
+        start_idx: int,
+        direction: str,
+        entry: float,
+        sl_init: float,
+        R: float,
+        cutoff_time: pd.Timestamp,
+    ) -> TradeSignalICT:
+        """
+        Simulation with BE + wide trailing stop:
+        1. SL at initial level until price reaches 1R → move SL to BE (entry price)
+        2. After BE, trail with 1.5R buffer: SL = entry + max(0, MFE - 1.5R)
+           This locks profit gradually while giving room to reach 2.5R TP.
+        3. TP at tp_r × R (2.5R)
+        4. Force close 15 min before session end
+        """
+        tp_price = float(entry + (R * self.tp_r) if direction == "bullish"
+                         else entry - (R * self.tp_r))
+        be_price = float(entry + (R * self.be_trigger_r) if direction == "bullish"
+                         else entry - (R * self.be_trigger_r))
 
-    # -----------------------------------------------------
+        t = TradeSignalICT(
+            direction=direction,
+            entry_time=df.index[start_idx],
+            entry_price=float(entry),
+            stop_loss=float(sl_init),
+            tp1=be_price,
+            tp2=tp_price,
+            tp3=tp_price,
+            risk_points=float(R),
+        )
 
-    def _bos(self, df, i, highs, lows):
-        if i < 2:
-            return None
+        hit_be = False
+        max_favorable = 0.0  # tracks peak unrealized profit in R-multiples
 
-        c = df.iloc[i]
-        prev = df.iloc[i-1]
+        for i in range(start_idx, len(df)):
+            c = df.iloc[i]
+            ts = df.index[i]
+            bars_since_entry = i - start_idx
 
-        sh = next((x for x in reversed(highs) if x <= i - self.swing_lookback), None)
-        sl = next((x for x in reversed(lows) if x <= i - self.swing_lookback), None)
-        if sh is None or sl is None:
-            return None
+            # Force close near session end
+            if ts >= cutoff_time:
+                t.exit_time = ts
+                t.exit_price = float(c.close)
+                if direction == "bullish":
+                    t.pnl_points = float(c.close) - t.entry_price
+                else:
+                    t.pnl_points = t.entry_price - float(c.close)
+                t.exit_reason = "SESSION_CLOSE"
+                return t
 
-        shv = df.iloc[sh].high
-        slv = df.iloc[sl].low
+            hi = float(c.high)
+            lo = float(c.low)
 
-        if c.close > shv and prev.close <= shv:
-            return ("bullish", shv, sh, sl)
+            # --- SL check first (conservative) ---
+            if direction == "bullish" and lo <= t.stop_loss:
+                t.exit_time = ts
+                t.exit_price = float(t.stop_loss)
+                t.pnl_points = t.stop_loss - t.entry_price
+                t.exit_reason = "SL_BE" if hit_be else "SL_HIT"
+                return t
 
-        if c.close < slv and prev.close >= slv:
-            return ("bearish", slv, sh, sl)
+            if direction == "bearish" and hi >= t.stop_loss:
+                t.exit_time = ts
+                t.exit_price = float(t.stop_loss)
+                t.pnl_points = t.entry_price - t.stop_loss
+                t.exit_reason = "SL_BE" if hit_be else "SL_HIT"
+                return t
 
-        return None
+            # --- TP check ---
+            if direction == "bullish" and hi >= tp_price:
+                t.exit_time = ts
+                t.exit_price = tp_price
+                t.pnl_points = tp_price - t.entry_price
+                t.exit_reason = "TP"
+                return t
 
-    # -----------------------------------------------------
+            if direction == "bearish" and lo <= tp_price:
+                t.exit_time = ts
+                t.exit_price = tp_price
+                t.pnl_points = t.entry_price - tp_price
+                t.exit_reason = "TP"
+                return t
 
-    def _opp_count(self, df, a, b, trend):
-        if a is None or b is None:
-            return 0
-        n = 0
-        for i in range(a, b+1):
-            r = df.iloc[i]
-            if trend == "bullish":
-                if self._bear(r):
-                    n += 1
-            else:
-                if self._bull(r):
-                    n += 1
-        return n
+            # --- BE trigger ---
+            if not hit_be:
+                if direction == "bullish" and hi >= be_price:
+                    hit_be = True
+                    t.stop_loss = t.entry_price
+                    self._log(event="BE_TRIGGER", time=ts, price=be_price)
+                elif direction == "bearish" and lo <= be_price:
+                    hit_be = True
+                    t.stop_loss = t.entry_price
+                    self._log(event="BE_TRIGGER", time=ts, price=be_price)
 
-    # -----------------------------------------------------
+            # --- Wide trailing after BE: lock profit gradually ---
+            # Trail buffer of 1.0R: SL = entry + max(0, MFE - 1.0R)
+            # Locks profit earlier to boost WR while still allowing
+            # trades room to reach 2.5R TP target.
+            if hit_be:
+                current_r = ((hi - entry) / R) if direction == "bullish" else ((entry - lo) / R)
+                if current_r > max_favorable:
+                    max_favorable = current_r
 
-    def _ob1(self, df, start, end, trend):
-        part = df.loc[start:end]
-        if len(part) < 6:
-            return None
+                # Trail when MFE exceeds 1.0R (after BE)
+                trail_r = max(0.0, max_favorable - 1.0)
+                if direction == "bullish":
+                    new_sl = entry + trail_r * R
+                    if new_sl > t.stop_loss:
+                        t.stop_loss = new_sl
+                else:
+                    new_sl = entry - trail_r * R
+                    if new_sl < t.stop_loss:
+                        t.stop_loss = new_sl
 
-        m3 = aggregate_1m_to_3m(part)
-        if len(m3) == 0:
-            return None
 
-        for _, r in m3.iloc[::-1].iterrows():
-            if trend == "bullish" and r.close < r.open:
-                low = min(r.low, part.low.min())
-                return (r.high, low)
-            if trend == "bearish" and r.close > r.open:
-                high = max(r.high, part.high.max())
-                return (high, r.low)
-
-        return None
-
-    # -----------------------------------------------------
-
-    def _touch(self, c, z):
-        return c.low <= z[0] and c.high >= z[1]
-
-    # -----------------------------------------------------
-
-    def _choch_level(self, df, start, i, trend):
-        seg = df.iloc[start:i]
-        if len(seg) == 0:
-            return None
-        return seg.high.max() if trend=="bullish" else seg.low.min()
-
-    # -----------------------------------------------------
-
-    def _ob2(self, trend, low, high):
-        rng = high - low
-        return high - rng*self.ob2_retracement if trend=="bullish" else low + rng*self.ob2_retracement
-
-    # -----------------------------------------------------
-
-    def _manage(self, df, i):
-        t = self.trade
-        c = df.iloc[i]
-
-        # SL
-        if t.direction=="bullish":
-            if c.low <= t.stop_loss:
-                t.exit_time=c.name
-                t.exit_price=t.stop_loss
-                t.exit_reason=("SL_BE_TP2" if self.tp2 else "SL_BE") if t.stop_loss==t.entry_price else "SL_HIT"
-                t.pnl_points += (t.stop_loss-t.entry_price)*self.position
-                self.position=0
-                return True
+        # fallback
+        last = df.iloc[-1]
+        t.exit_time = df.index[-1]
+        t.exit_price = float(last.close)
+        if direction == "bullish":
+            t.pnl_points = float(last.close) - t.entry_price
         else:
-            if c.high >= t.stop_loss:
-                t.exit_time=c.name
-                t.exit_price=t.stop_loss
-                t.exit_reason=("SL_BE_TP2" if self.tp2 else "SL_BE") if t.stop_loss==t.entry_price else "SL_HIT"
-                t.pnl_points += (t.entry_price-t.stop_loss)*self.position
-                self.position=0
-                return True
+            t.pnl_points = t.entry_price - float(last.close)
+        t.exit_reason = "SESSION_CLOSE"
+        return t
 
-        # TP1 BE
-        if not self.tp1:
-            if t.direction=="bullish" and c.high>=t.tp1:
-                self.tp1=True
-                t.stop_loss=t.entry_price
-            if t.direction=="bearish" and c.low<=t.tp1:
-                self.tp1=True
-                t.stop_loss=t.entry_price
+    # ----------------- main -----------------
 
-        # TP2 50%
-        if self.tp1 and not self.tp2:
-            if t.direction=="bullish" and c.high>=t.tp2:
-                self.tp2=True
-                t.pnl_points+=(t.tp2-t.entry_price)*0.5
-                self.position=0.5
-            if t.direction=="bearish" and c.low<=t.tp2:
-                self.tp2=True
-                t.pnl_points+=(t.entry_price-t.tp2)*0.5
-                self.position=0.5
+    def generate_signals(self, df: pd.DataFrame, htf_trend: Optional[str] = None) -> List[TradeSignalICT]:
+        """
+        Expects df already sliced to the session window.
+        htf_trend: "bullish" or "bearish" from 50/200 EMA on H1 (higher timeframe filter).
+                   If None, falls back to ORB bias.
+        Returns a list of completed TradeSignalICT objects (entry + exit filled).
+        """
+        self.debug_rows = []
+        out: List[TradeSignalICT] = []
 
-        # TP3 close all
-        if t.direction=="bullish" and c.high>=t.tp3:
-            t.pnl_points+=(t.tp3-t.entry_price)*self.position
-            t.exit_reason="TP3"
-            t.exit_time=c.name
-            t.exit_price=t.tp3
-            return True
+        if df is None or len(df) < 80:
+            return out
 
-        if t.direction=="bearish" and c.low<=t.tp3:
-            t.pnl_points+=(t.entry_price-t.tp3)*self.position
-            t.exit_reason="TP3"
-            t.exit_time=c.name
-            t.exit_price=t.tp3
-            return True
+        cols = {c.lower(): c for c in df.columns}
+        for need in ["open", "high", "low", "close"]:
+            if need not in cols:
+                raise ValueError(f"Missing '{need}' column in df. Got: {df.columns.tolist()}")
 
-        return False
+        w = df.copy()
 
-    # -----------------------------------------------------
+        session_start = w.index[0]
+        orb_end = session_start + pd.Timedelta(minutes=self.orb_minutes)
+        entry_cutoff = session_start + pd.Timedelta(hours=self.entry_hours)
+        breakout_deadline = orb_end + pd.Timedelta(minutes=self.breakout_window_minutes)
+        cutoff_close = w.index[-1] - pd.Timedelta(minutes=15)
 
-    def generate_signals(self, df: pd.DataFrame):
-        self._reset()
-        out=[]
+        orb = w[(w.index >= session_start) & (w.index < orb_end)]
+        if len(orb) < max(3, self.orb_minutes - 2):
+            return out
 
-        highs,lows=find_swing_highs_lows(df,self.swing_lookback)
-        cutoff = df.index[-1] - pd.Timedelta(minutes=15)
+        orbH = float(orb["high"].max())
+        orbL = float(orb["low"].min())
+        orb_range = orbH - orbL
 
-        for i in range(self.swing_lookback,len(df)):
-            c=df.iloc[i]
+        # Skip degenerate ORB (near-zero range)
+        if orb_range <= 0:
+            self._log(event="ORB_REJECT", time=session_start, reason="zero_range")
+            return out
 
-            # manage trade
-            if self.trade:
-                if self._manage(df,i):
-                    out.append(self.trade)
-                    self.trade=None
-                    self.trade_taken=True
-                elif c.name >= cutoff:
-                    # 15-min early close: force close at market price
-                    t = self.trade
-                    t.exit_time = c.name
-                    t.exit_price = float(c.close)
-                    if t.direction == "bullish":
-                        t.pnl_points += (c.close - t.entry_price) * self.position
-                    else:
-                        t.pnl_points += (t.entry_price - c.close) * self.position
-                    t.exit_reason = "SESSION_CLOSE"
-                    out.append(t)
-                    self.trade = None
-                    self.trade_taken = True
-                continue
+        # VOLATILITY CONTRACTION FILTER (research-backed: 3x expectancy)
+        # Only trade when ORB is compressed (coiled spring).
+        # A narrow ORB relative to its own candles' avg range means the market
+        # is consolidating → breakout is more likely to produce a trend day.
+        orb_candle_ranges = orb["high"] - orb["low"]
+        orb_avg_candle_range = float(orb_candle_ranges.mean())
+        orb_median_candle_range = float(orb_candle_ranges.median())
+        # ORB total range vs what you'd expect if each candle was trending
+        # If ORB range < expected (candles overlapping = compression), take the trade
+        expected_range = orb_avg_candle_range * len(orb) * 0.40  # 40% = moderate compression filter
+        if orb_range > expected_range and expected_range > 0:
+            self._log(event="ORB_REJECT", time=session_start, reason="wide_orb",
+                      orb_range=round(orb_range, 2), expected=round(expected_range, 2))
+            return out
 
-            if self.trade_taken:
-                continue
+        self._log(event="ORB", time=session_start, orbH=orbH, orbL=orbL, orb_range=orb_range)
 
-            # no new setups in last 15 min
-            if c.name >= cutoff:
-                continue
+        # Trend direction filter: require BOTH HTF + ORB bias to agree (double confirmation)
+        # This maximizes quality: only trade when intraday momentum AND structural trend align
+        orb_open = float(orb.iloc[0]["open"])
+        orb_close = float(orb.iloc[-1]["close"])
+        orb_bias = "bullish" if orb_close > orb_open else "bearish"
+        if htf_trend is not None:
+            if htf_trend != orb_bias:
+                self._log(event="TREND_CONFLICT", time=session_start,
+                          htf_trend=htf_trend, orb_bias=orb_bias)
+                return out
+        trend_filter = orb_bias  # both agree at this point
 
-            bos=self._bos(df,i,highs,lows)
-            if bos:
-                d,level,sh,sl=bos
-                self._log(event="BOS",time=c.name,dir=d,level=level)
+        scan = w[(w.index >= orb_end) & (w.index < entry_cutoff)]
+        if len(scan) < 10:
+            return out
 
-                if d=="bullish":
-                    self.bull_bos+=1
-                    self.bear_bos=0
-                    if self.bull_bos>=self.bos_required:
-                        self.trend="bullish"
-                else:
-                    self.bear_bos+=1
-                    self.bull_bos=0
-                    if self.bear_bos>=self.bos_required:
-                        self.trend="bearish"
+        scan = scan.copy().reset_index()
+        idx_col = [c for c in scan.columns if c not in ["open", "high", "low", "close", "volume"]][0]
+        scan = scan.rename(columns={idx_col: "ts"})
 
-                if self.trend and d!=self.trend:
-                    self.sweep_active=True
-                    self.pullback_start=i
-                    self.ob1=None
-                    self.ob1_touch_idx=None
-                    self.ob1_touch_price=None
-                    self.choch=False
-                    self.choch_idx=None
-                    self._log(event="SWEEP",time=c.name,trend=self.trend)
+        # precompute rolling avg range for displacement filter
+        scan["range"] = scan["high"] - scan["low"]
+        scan["avg_range"] = scan["range"].rolling(self.lookback_ranges, min_periods=3).mean()
 
-                continue
+        start_i = max(3, self.lookback_ranges)
 
-            if not self.trend or not self.sweep_active:
-                continue
+        for i in range(start_i, len(scan)):
+            ts = scan.at[i, "ts"]
+            if ts >= cutoff_close:
+                break
+            if ts > breakout_deadline:
+                break
 
-            # extend pullback
-            self.pullback_end=i
+            o = float(scan.at[i, "open"])
+            h = float(scan.at[i, "high"])
+            l = float(scan.at[i, "low"])
+            c = float(scan.at[i, "close"])
+            candle_range = h - l
 
-            if not self.ob1:
-                cnt=self._opp_count(df,self.pullback_start,self.pullback_end,self.trend)
-                if cnt>=self.pullback_min:
-                    s=df.index[self.pullback_start]
-                    e=df.index[self.pullback_end]
-                    self.ob1=self._ob1(df,s,e,self.trend)
-                    if self.ob1:
-                        self._log(event="OB1",time=c.name,zone=self.ob1)
-
-            if not self.ob1:
-                continue
-
-            if self.ob1 and self.ob1_touch_idx is None:
-                if self._touch(c,self.ob1):
-                    self.ob1_touch_idx=i
-                    self.ob1_touch_price=c.low if self.trend=="bullish" else c.high
-                    self._log(event="OB1_TOUCH",time=c.name)
-                continue
-
-            if self.ob1_touch_idx and not self.choch:
-                lvl=self._choch_level(df,self.ob1_touch_idx,i,self.trend)
-                if lvl is None:
-                    continue
-
-                if self.trend=="bullish" and c.close>lvl:
-                    self.choch=True
-                    self.choch_idx=i
-                    self._log(event="CHOCH",time=c.name)
-
-                if self.trend=="bearish" and c.close<lvl:
-                    self.choch=True
-                    self.choch_idx=i
-                    self._log(event="CHOCH",time=c.name)
-                continue
-
-            if self.choch and not self.trade_taken:
-                # OB2 = last opposite-color 3m candle from touch → CHoCH (same logic as OB1)
-                touch_ts = df.index[self.ob1_touch_idx]
-                choch_ts = df.index[self.choch_idx]
-                ob2_zone = self._ob1(df, touch_ts, choch_ts, self.trend)
-
-                if ob2_zone is None:
-                    continue
-
-                if not self._touch(c, ob2_zone):
-                    continue
-
-                # market order entry: aim for zone midpoint (realistic fill for manual entry)
-                entry = (ob2_zone[0] + ob2_zone[1]) / 2.0
-
-                # SL = OB2 zone low - buffer (bullish) or OB2 zone high + buffer (bearish)
-                if self.trend == "bullish":
-                    sl = ob2_zone[1] - self.sl_buffer
-                    risk = entry - sl
-                else:
-                    sl = ob2_zone[0] + self.sl_buffer
-                    risk = sl - entry
-
-                if risk<self.min_sl or risk>self.max_sl:
-                    continue
-
-                tp1=entry+risk if self.trend=="bullish" else entry-risk
-                tp2=entry+risk*2 if self.trend=="bullish" else entry-risk*2
-                tp3=entry+risk*3 if self.trend=="bullish" else entry-risk*3
-
-                self.trade=TradeSignalICT(self.trend,c.name,entry,sl,tp1,tp2,tp3,risk)
-                self.tp1=False
-                self.tp2=False
-                self.position=1
-                self._log(event="ENTRY",time=c.name)
-
-        # safety fallback: close any surviving trade at market
-        if self.trade and self.trade.exit_reason is None:
-            t = self.trade
-            t.exit_time = df.index[-1]
-            t.exit_price = float(df.iloc[-1].close)
-            if t.direction == "bullish":
-                t.pnl_points += (t.exit_price - t.entry_price) * self.position
+            # --- Direction: breakout close beyond ORB with margin ---
+            direction = None
+            margin = self.breakout_margin * orb_range
+            if c > orbH + margin:
+                direction = "bullish"
+            elif c < orbL - margin:
+                direction = "bearish"
             else:
-                t.pnl_points += (t.entry_price - t.exit_price) * self.position
-            t.exit_reason = "SESSION_CLOSE"
-            out.append(t)
-            self.trade = None
+                continue
+
+            # --- Filter 1: Displacement ---
+            avg_r = float(scan.at[i, "avg_range"]) if pd.notna(scan.at[i, "avg_range"]) else None
+            if avg_r is None or avg_r <= 0:
+                continue
+            if candle_range < self.disp_mult * avg_r:
+                continue
+
+            # --- Filter 2: Body % ---
+            body_pct = abs(c - o) / candle_range if candle_range > 0 else 0.0
+            if body_pct < self.body_min:
+                continue
+
+            # --- Filter 3: Close strength (close must be in correct portion) ---
+            if candle_range > 0:
+                if direction == "bullish":
+                    # Close should be in the upper portion of the candle
+                    close_pos = (c - l) / candle_range
+                    if close_pos < (1.0 - self.close_strength):
+                        continue
+                else:
+                    # Close should be in the lower portion of the candle
+                    close_pos = (h - c) / candle_range
+                    if close_pos < (1.0 - self.close_strength):
+                        continue
+
+            # --- Filter 4: Trend alignment (HTF EMA or ORB bias) ---
+            if direction != trend_filter:
+                continue
+
+            # --- PULLBACK RETEST ENTRY ---
+            # Wait for price to pull back to ORB level and confirm hold.
+            # Benefits: tighter SL, confirmed level, higher WR, better RR.
+            # If no pullback within window, fall back to direct breakout entry.
+            df_idx = w.index.get_indexer([ts])[0]
+            retest_found = False
+            entry_price = None
+            sl = None
+            next_idx = None
+            retest_limit = min(df_idx + 1 + 20, len(w))
+
+            for look in range(df_idx + 1, retest_limit):
+                look_bar = w.iloc[look]
+                look_ts = w.index[look]
+                if look_ts >= cutoff_close:
+                    break
+
+                if direction == "bullish":
+                    # Price pulls back near ORB high (within 10% of ORB range)
+                    if float(look_bar["low"]) <= orbH + orb_range * 0.10:
+                        # Confirm bullish hold: close back above ORB high
+                        if float(look_bar["close"]) >= orbH:
+                            if look + 1 < len(w):
+                                next_idx = look + 1
+                                entry_price = float(w.iloc[next_idx]["open"])
+                                sl = float(look_bar["low"]) - self.sl_buffer
+                                retest_found = True
+                            break
+                else:
+                    # Price pulls back near ORB low (within 10% of ORB range)
+                    if float(look_bar["high"]) >= orbL - orb_range * 0.10:
+                        # Confirm bearish hold: close back below ORB low
+                        if float(look_bar["close"]) <= orbL:
+                            if look + 1 < len(w):
+                                next_idx = look + 1
+                                entry_price = float(w.iloc[next_idx]["open"])
+                                sl = float(look_bar["high"]) + self.sl_buffer
+                                retest_found = True
+                            break
+
+            if not retest_found:
+                # No pullback — use direct breakout entry (next bar)
+                next_idx = df_idx + 1
+                if next_idx >= len(w):
+                    continue
+                entry_price = float(w.iloc[next_idx]["open"])
+                if direction == "bullish":
+                    sl = l - self.sl_buffer
+                else:
+                    sl = h + self.sl_buffer
+
+            if next_idx is None or entry_price is None or sl is None:
+                continue
+
+            # Re-calculate R from actual entry price
+            if direction == "bullish":
+                R = entry_price - sl
+            else:
+                R = sl - entry_price
+
+            if R <= 0 or R < self.min_sl or R > self.max_sl:
+                continue
+
+            self._log(
+                event="ENTRY_SIGNAL",
+                time=w.index[next_idx],
+                dir=direction,
+                entry=entry_price,
+                signal_bar_close=c,
+                sl=sl,
+                R=R,
+                body_pct=round(body_pct, 3),
+                disp_ratio=round(candle_range / avg_r, 2),
+            )
+
+            trade = self._simulate_trade(
+                df=w,
+                start_idx=next_idx + 1,  # simulate from bar AFTER entry
+                direction=direction,
+                entry=entry_price,
+                sl_init=sl,
+                R=R,
+                cutoff_time=cutoff_close,
+            )
+            out.append(trade)
+            break  # 1 trade per day
 
         return out

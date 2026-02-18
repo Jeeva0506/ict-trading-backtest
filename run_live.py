@@ -1,7 +1,10 @@
 """
-FundedNext ICT Trading Bot - Main Entry Point
+FundedNext ORB Trading Bot - Main Entry Point
 ==============================================
 Run this script to start the 24/7 trading bot
+
+Indices: SPX500, NDX100, GER30, US30
+Strategy: Opening Range Breakout (15-min ORB)
 
 Usage:
     python run_live.py              # Start live trading
@@ -32,9 +35,10 @@ def show_banner():
     """Display startup banner"""
     print("""
     +==============================================================+
-    |         FUNDEDNEXT ICT TRADING BOT v1.0                     |
+    |         FUNDEDNEXT ORB TRADING BOT v2.0                     |
     |         --------------------------------                    |
-    |         4 Profitable Indices | 24/7 Operation               |
+    |         SPX500 | NDX100 | GER30 | US30                     |
+    |         15-min ORB | Pullback Retest | 2.5R TP              |
     +==============================================================+
     """)
 
@@ -166,7 +170,7 @@ def run_live():
     print("=" * 60)
     print(f"   Start time: {datetime.now()}")
     print(f"   Mode: 24/7 Automated")
-    print(f"   Indices: SPX500, GER30, FRA40, HK50")
+    print(f"   Indices: {', '.join(PROFITABLE_INDICES.keys())}")
     print("\n   Press Ctrl+C to stop\n")
     
     trader = LiveTrader()
@@ -179,7 +183,7 @@ def run_live():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='FundedNext ICT Trading Bot')
+    parser = argparse.ArgumentParser(description='FundedNext ORB Trading Bot')
     parser.add_argument('--test', action='store_true', help='Run in test mode')
     parser.add_argument('--status', action='store_true', help='Show current status')
     parser.add_argument('--config', action='store_true', help='Show configuration')
