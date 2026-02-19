@@ -53,8 +53,9 @@ logger.addHandler(console_handler)
 # Add path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'live'))
 
-from config_fundednext import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config_fundednext import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, HEARTBEAT_URL, HEARTBEAT_INTERVAL_SECONDS
 from telegram_notifier import TelegramNotifier
+import requests as _requests
 
 # Lock file to prevent multiple watchdog instances
 LOCK_FILE = Path(__file__).parent / 'live' / 'logs' / 'watchdog.lock'
@@ -128,6 +129,7 @@ class TradingWatchdog:
         self._mt5_path_cache = None  # Cache found MT5 path
         self._stdout_file = None
         self._stderr_file = None
+        self._last_heartbeat = 0  # epoch timestamp of last heartbeat ping
     
     # ------------------------------------------------------------------
     # Bot process management
@@ -335,6 +337,23 @@ class TradingWatchdog:
             return False
     
     # ------------------------------------------------------------------
+    # External heartbeat (healthchecks.io)
+    # ------------------------------------------------------------------
+    def _send_heartbeat(self):
+        """Ping external heartbeat URL if configured and interval has elapsed."""
+        if not HEARTBEAT_URL:
+            return
+        now = time.time()
+        if now - self._last_heartbeat < HEARTBEAT_INTERVAL_SECONDS:
+            return  # Not time yet
+        try:
+            _requests.get(HEARTBEAT_URL, timeout=10)
+            self._last_heartbeat = now
+            logger.debug("Heartbeat ping sent")
+        except Exception as e:
+            logger.warning(f"Heartbeat ping failed: {e}")
+    
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
     def run(self):
@@ -362,6 +381,9 @@ class TradingWatchdog:
         while True:
             try:
                 time.sleep(30)  # Check every 30 seconds
+                
+                # ── External heartbeat ping ──────────────────────────
+                self._send_heartbeat()
                 
                 # Check system resources
                 resources = self.check_system_resources()

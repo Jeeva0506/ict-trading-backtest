@@ -44,18 +44,36 @@ FUNDEDNEXT_RULES = {
 }
 
 # ============================================================================
-# ADAPTIVE RISK STRATEGY (For Evaluation Phase - Fast Pass)
+# ADAPTIVE RISK STRATEGY
 # ============================================================================
-# Start with aggressive 1.5% risk, switch to 1% when drawdown exceeds threshold
-# $6,000 Account with 8% DD limit: Use 2% DD threshold for safety
-# Backtest Results: 50.4% return, 7.2% max DD, 8% target in 5 trades
+# Two profiles: Evaluation (aggressive to pass fast) and Funded (conservative to survive)
+#
+# ── EVALUATION PHASE (current) ──
+# Goal: Pass 8% target quickly. 1.5% risk, drop to 1% at 2% DD.
+# $6,000 account → ~$90/trade risk → target in ~5-8 winning trades
+#
+# ── FUNDED PHASE (switch after passing) ──
+# Goal: 2-3% monthly payout on $100k. 0.5% risk, drop to 0.25% at 4% DD.
+# $100k account → $500/trade risk → ~$2k-3k/month target
+# To activate: uncomment FUNDED block below, comment out EVALUATION block.
+#
+# ── EVALUATION (active) ──
 ADAPTIVE_RISK = {
-    'enabled': True,                # Set False for funded account (use fixed 1.5%)
-    'default_risk_percent': 1.5,    # Risk when account is healthy
-    'reduced_risk_percent': 1.0,    # Conservative risk when in drawdown
-    'drawdown_threshold': 2.0,      # Switch to reduced risk at 2% DD (safer for 8% limit)
-    'recovery_threshold': 0.5,      # Switch back to default when DD < 0.5%
+    'enabled': True,
+    'default_risk_percent': 1.5,    # Aggressive to pass challenge fast
+    'reduced_risk_percent': 1.0,    # Conservative when in drawdown
+    'drawdown_threshold': 2.0,      # Switch to 1.0% at 2% DD
+    'recovery_threshold': 0.5,      # Switch back to 1.5% when DD < 0.5%
 }
+#
+# ── FUNDED (activate after passing challenge) ──
+# ADAPTIVE_RISK = {
+#     'enabled': True,
+#     'default_risk_percent': 0.5,    # Conservative — capital preservation
+#     'reduced_risk_percent': 0.25,   # Ultra-safe when in drawdown
+#     'drawdown_threshold': 4.0,      # Switch to 0.25% at 4% DD
+#     'recovery_threshold': 1.0,      # Switch back to 0.5% when DD < 1%
+# }
 
 # ============================================================================
 # NOTIFICATION SETTINGS (from .env)
@@ -63,6 +81,23 @@ ADAPTIVE_RISK = {
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
+
+# ============================================================================
+# EXTERNAL HEARTBEAT MONITOR (healthchecks.io)
+# ============================================================================
+# Free service that alerts via Telegram if the bot stops pinging.
+# Detects: laptop power-off, internet loss, full system crash.
+#
+# Setup (one-time, 2 minutes):
+#   1. Sign up at https://healthchecks.io (free, no card)
+#   2. Create a check: Period=5min, Grace=10min
+#   3. Copy the ping URL and paste in .env as HEARTBEAT_URL
+#   4. In healthchecks.io → Integrations → Add Telegram → follow bot link
+#
+# The watchdog pings this URL every 5 minutes. If no ping for 10 minutes,
+# healthchecks.io sends YOU a Telegram alert — even if this laptop is dead.
+HEARTBEAT_URL = os.getenv('HEARTBEAT_URL', '')  # e.g. https://hc-ping.com/your-uuid-here
+HEARTBEAT_INTERVAL_SECONDS = 300  # Ping every 5 minutes
 
 # ============================================================================
 # PROFITABLE INDICES ONLY - With correct MT5 specifications
