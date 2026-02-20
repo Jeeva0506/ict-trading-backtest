@@ -104,7 +104,7 @@ def show_config():
     print(f"   Daily Drawdown: {FUNDEDNEXT_RULES['daily_drawdown_percent']}%")
     print(f"   Daily DD Stop: {FUNDEDNEXT_RULES['daily_drawdown_stop']}%")
     print(f"   Risk per Trade: {FUNDEDNEXT_RULES['risk_per_trade_percent']}%")
-    print(f"   News Buffer: {FUNDEDNEXT_RULES['news_buffer_minutes']} minutes")
+    print(f"   News Buffer: {FUNDEDNEXT_RULES['news_buffer_before_minutes']}min before / {FUNDEDNEXT_RULES['news_buffer_after_minutes']}min after")
     
     print("\n[INDICES] Profitable Indices:")
     for symbol, config in PROFITABLE_INDICES.items():

@@ -40,7 +40,8 @@ FUNDEDNEXT_RULES = {
     'daily_drawdown_stop': float(os.getenv('DAILY_DRAWDOWN_STOP', '2.0')),
     'risk_per_trade_percent': float(os.getenv('RISK_PER_TRADE', '1.0')),
     'max_trades_per_day': 3,
-    'news_buffer_minutes': int(os.getenv('NEWS_BUFFER_MINUTES', '30')),
+    'news_buffer_before_minutes': 5,    # Block 5 min BEFORE high-impact news
+    'news_buffer_after_minutes': 15,    # Block 15 min AFTER high-impact news
 }
 
 # ============================================================================

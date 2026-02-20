@@ -472,7 +472,8 @@ class LiveTrader:
     def __init__(self):
         self.mt5 = MT5Connector()
         self.news_filter = EconomicCalendar(
-            buffer_minutes=FUNDEDNEXT_RULES.get("news_buffer_minutes", 30)
+            buffer_before_minutes=5,   # block 5 min before high-impact news
+            buffer_after_minutes=15,   # block 15 min after high-impact news
         )
         self.dd_protection: Optional[DrawdownProtection] = None
         self.state = TradingState()
@@ -486,6 +487,8 @@ class LiveTrader:
         self.tracked_positions: Dict[int, dict] = {}
         # per-symbol daily trade taken flag (reset at daily_reset)
         self.trade_taken_today: Dict[str, bool] = {}
+        # Telegram block notification throttle: {symbol: last_notify_time}
+        self._block_notify_sent: Dict[str, datetime] = {}
 
         # heartbeat
         self._heartbeat_file = self.HEARTBEAT_FILE
@@ -1060,12 +1063,25 @@ class LiveTrader:
 
         sig = signals[0]  # 1 trade per day per symbol
 
-        # The signal's entry_time must be very recent (within last 5 bars)
-        # to avoid re-entering old signals on restart
+        # The signal's entry_time must be reasonably recent (within last 15 bars)
+        # to avoid re-entering old signals on restart. Previously 5 bars — too
+        # tight; a 15-min news block would make the signal stale before the
+        # block lifts. 15 bars gives a safe window for news + reconnect delays.
         entry_ts = pd.Timestamp(sig.entry_time)
         bars_since_entry = len(session_data[session_data.index > entry_ts])
-        if bars_since_entry > 5:
+        if bars_since_entry > 15:
             return None  # signal is old
+
+        # Price proximity guard: reject stale signal if market has moved
+        # more than 0.5R away from intended entry (would ruin the RR)
+        bid, ask = self.mt5.get_current_price(symbol)
+        if bid and sig.risk_points > 0:
+            mid_price = (bid + ask) / 2 if ask else bid
+            drift = abs(mid_price - sig.entry_price)
+            if drift > 0.5 * sig.risk_points:
+                logger.info(f"{symbol}: Signal stale - price drifted {drift:.2f} pts "
+                            f"(> 0.5R = {0.5 * sig.risk_points:.2f})")
+                return None
 
         return {
             "direction": sig.direction,
@@ -1086,10 +1102,16 @@ class LiveTrader:
             return False, "trading paused"
         if sl_is_trading_paused():
             return False, "SL protection pause"
+        # Market open check FIRST (avoid noisy news/DD logs for closed markets)
+        if not is_market_open(symbol):
+            return False, "market closed"
         if self.state.is_daily_limit_hit:
             return False, "daily limit hit"
         if self.trade_taken_today.get(symbol, False):
             return False, "already traded today"
+        # Max trades per day across all symbols
+        if self.state.daily_trades >= FUNDEDNEXT_RULES.get("max_trades_per_day", 3):
+            return False, "max daily trades reached"
         # DD check
         if self.dd_protection:
             account = self.mt5.get_account_info()
@@ -1100,22 +1122,22 @@ class LiveTrader:
                 if not dd["can_trade"]:
                     return False, (f"DD limit (overall={dd['overall_dd']:.1f}%, "
                                    f"daily={dd['daily_dd']:.1f}%)")
-        # News filter (Forex Factory high-impact only)
-        is_news, event = self.news_filter.is_news_time(symbol)
-        if is_news:
-            logger.info(f"{symbol}: News blocked - {event['title']} "
-                        f"in {event['minutes_away']:.0f}m")
-            return False, f"news: {event['title']}"
         # Existing position check (1 per symbol max)
         existing = self.mt5.get_open_positions(symbol)
         if len(existing) >= 1:
             return False, "position already open"
-        # Market open
-        if not is_market_open(symbol):
-            return False, "market closed"
-        # Max trades per day across all symbols
-        if self.state.daily_trades >= FUNDEDNEXT_RULES.get("max_trades_per_day", 3):
-            return False, "max daily trades reached"
+        # News filter (Forex Factory high-impact only, 5min before / 15min after)
+        is_news, event = self.news_filter.is_news_time(symbol)
+        if is_news:
+            mins = event['minutes_away']
+            label = f"in {mins:.0f}m" if mins > 0 else f"{abs(mins):.0f}m ago"
+            logger.info(f"{symbol}: News blocked - {event['title']} {label}")
+            # Telegram notification — max once per event per symbol (throttle 10 min)
+            last_notify = self._block_notify_sent.get(symbol)
+            if last_notify is None or (datetime.now() - last_notify).total_seconds() > 600:
+                self.telegram.news_blocked(symbol, event['title'], int(mins))
+                self._block_notify_sent[symbol] = datetime.now()
+            return False, f"news: {event['title']}"
         return True, "ok"
 
     # ────────────────────────────────────────────────────────────────────
@@ -1524,6 +1546,18 @@ class LiveTrader:
 
                     can, reason = self._can_trade(symbol)
                     if not can:
+                        # Send ONE Telegram notification per symbol per day
+                        # for non-trivial blocks (skip "market closed" & "already traded")
+                        if reason not in ("market closed", "already traded today",
+                                          "trading disabled", "trading paused"):
+                            block_key = f"{symbol}_{reason}"
+                            last_t = self._block_notify_sent.get(block_key)
+                            if last_t is None or (datetime.now() - last_t).total_seconds() > 600:
+                                self.telegram.send_message(
+                                    f"\u26a0\ufe0f <b>Trade Blocked — {symbol}</b>\n\n"
+                                    f"<b>Reason:</b> {reason}\n"
+                                    f"\u23f0 {ist_time()}")
+                                self._block_notify_sent[block_key] = datetime.now()
                         continue
 
                     sig = self._generate_signal(symbol)
@@ -1532,6 +1566,7 @@ class LiveTrader:
                                     f"entry={sig['entry_price']:.2f} "
                                     f"SL={sig['stop_loss']:.2f}")
                         self._execute_signal(symbol, sig)
+                    # else: no valid ORB breakout this cycle — silent, normal
 
                 # ── Position management (BE, trail, session close) ─────
                 self._manage_positions()
