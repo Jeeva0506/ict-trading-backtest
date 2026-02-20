@@ -490,6 +490,10 @@ class LiveTrader:
         # Telegram block notification throttle: {symbol: last_notify_time}
         self._block_notify_sent: Dict[str, datetime] = {}
 
+        # No-trade streak tracker (alert after 7 consecutive trading days)
+        self._no_trade_streak: int = 0          # consecutive trading days without a trade
+        self._last_trade_date: str = ""         # date string of last trade
+
         # heartbeat
         self._heartbeat_file = self.HEARTBEAT_FILE
 
@@ -559,6 +563,8 @@ class LiveTrader:
                 "daily_trades": self.state.daily_trades,
                 "last_reset_date": self.state.last_reset_date,
                 "trade_taken_today": self.trade_taken_today,
+                "no_trade_streak": self._no_trade_streak,
+                "last_trade_date": self._last_trade_date,
                 "positions": {},
             }
             for ticket, info in self.tracked_positions.items():
@@ -597,6 +603,11 @@ class LiveTrader:
                 self.trade_taken_today = data.get("trade_taken_today", {})
                 logger.info(f"Restored daily state: PnL=${self.state.daily_pnl:.2f}, "
                             f"trades={self.state.daily_trades}")
+
+            # Always restore streak tracker (not date-dependent)
+            self._no_trade_streak = data.get("no_trade_streak", 0)
+            self._last_trade_date = data.get("last_trade_date", "")
+            logger.info(f"No-trade streak: {self._no_trade_streak} days (last trade: {self._last_trade_date or 'never'})")
 
             # Reconcile tracked positions with MT5
             saved_pos = data.get("positions", {})
@@ -896,6 +907,31 @@ class LiveTrader:
                 balance = account["balance"]
                 self.dd_protection.reset_daily(balance)
                 self.state.daily_start_balance = balance
+            # ── No-trade streak check (before resetting daily_trades) ──
+            prev_day = self.state.last_reset_date
+            if prev_day:  # not first boot
+                from datetime import date as _date
+                try:
+                    prev = _date.fromisoformat(prev_day)
+                    # Only count weekdays (Mon-Fri) as trading days
+                    if prev.weekday() < 5:
+                        if self.state.daily_trades == 0:
+                            self._no_trade_streak += 1
+                            logger.info(f"No trades on {prev_day} — streak: {self._no_trade_streak} days")
+                        else:
+                            self._no_trade_streak = 0
+                            self._last_trade_date = prev_day
+
+                        if self._no_trade_streak >= 7:
+                            self.telegram.send_message(
+                                f"\U0001f6a8 <b>NO TRADES FOR {self._no_trade_streak} TRADING DAYS</b>\n\n"
+                                f"Last trade: {self._last_trade_date or 'never'}\n"
+                                f"Strategy filters may be too strict.\n"
+                                f"Please review missed signals.")
+                            logger.warning(f"NO-TRADE STREAK: {self._no_trade_streak} consecutive trading days")
+                except Exception:
+                    pass
+
             self.state.daily_pnl = 0.0
             self.state.daily_trades = 0
             self.state.is_daily_limit_hit = False
@@ -1202,6 +1238,17 @@ class LiveTrader:
         # and ensures the P&L from any emergency close is captured.
         self.trade_taken_today[symbol] = True
         self.state.daily_trades += 1
+        # Reset no-trade streak on successful fill
+        import pytz as _pytz
+        try:
+            _est_now = datetime.now(_pytz.timezone('US/Eastern'))
+            _fn_day = _est_now.strftime("%Y-%m-%d")
+            if _est_now.hour < 17:
+                _fn_day = (_est_now - timedelta(days=1)).strftime("%Y-%m-%d")
+            self._no_trade_streak = 0
+            self._last_trade_date = _fn_day
+        except Exception:
+            self._no_trade_streak = 0
         self.tracked_positions[ticket] = {
             "symbol": symbol,
             "direction": sig["direction"],
