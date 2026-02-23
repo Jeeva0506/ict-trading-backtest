@@ -141,7 +141,7 @@ class DrawdownProtection:
             "can_trade": overall_dd < max_dd_limit and daily_dd < daily_dd_stop,
         }
 
-    # ── adaptive risk ───────────────────────────────────────────────────
+    # ── adaptive risk (3-tier step-down) ─────────────────────────────────
     def get_adaptive_risk(self, current_balance: float) -> float:
         if not ADAPTIVE_RISK.get("enabled", False):
             return FUNDEDNEXT_RULES["risk_per_trade_percent"]
@@ -149,15 +149,22 @@ class DrawdownProtection:
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
 
-        dd_pct = ((self.peak_balance - current_balance) / self.initial_balance) * 100
-        dd_thresh = ADAPTIVE_RISK.get("drawdown_threshold", 3.0)
-        recovery  = ADAPTIVE_RISK.get("recovery_threshold", 1.0)
-        default_r = ADAPTIVE_RISK.get("default_risk_percent", 1.5)
-        reduced_r = ADAPTIVE_RISK.get("reduced_risk_percent", 1.0)
+        # DD from initial balance (FundedNext Stellar measures from initial)
+        dd_pct = ((self.initial_balance - current_balance) / self.initial_balance) * 100
+        dd_pct = max(0.0, dd_pct)  # can't be negative
 
-        if dd_pct >= dd_thresh:
-            logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {dd_thresh}% -> {reduced_r}% risk")
-            return reduced_r
+        default_r = ADAPTIVE_RISK.get("default_risk_percent", 1.5)
+        tier2_r   = ADAPTIVE_RISK.get("tier2_risk_percent", ADAPTIVE_RISK.get("reduced_risk_percent", 0.75))
+        tier3_r   = ADAPTIVE_RISK.get("tier3_risk_percent", 0.5)
+        tier2_dd  = ADAPTIVE_RISK.get("tier2_threshold", ADAPTIVE_RISK.get("drawdown_threshold", 3.0))
+        tier3_dd  = ADAPTIVE_RISK.get("tier3_threshold", 5.0)
+
+        if dd_pct >= tier3_dd:
+            logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {tier3_dd}% -> {tier3_r}% risk (TIER 3)")
+            return tier3_r
+        elif dd_pct >= tier2_dd:
+            logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {tier2_dd}% -> {tier2_r}% risk (TIER 2)")
+            return tier2_r
         return default_r
 
     # ── daily reset ─────────────────────────────────────────────────────

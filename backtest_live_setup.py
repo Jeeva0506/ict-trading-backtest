@@ -281,9 +281,13 @@ LIVE_INDEX_CONFIG = {
 ADAPTIVE_RISK = {
     "enabled": True,
     "default_risk_percent": 1.5,
-    "reduced_risk_percent": 1.0,
-    "daily_dd_reduce_threshold": 1.0,
-    "daily_dd_stop_threshold": 2.0,
+    "tier2_risk_percent": 0.75,
+    "tier3_risk_percent": 0.5,
+    "reduced_risk_percent": 0.75,       # legacy compat = tier2
+    "tier2_threshold": 3.0,             # 3% DD from initial -> tier2
+    "tier3_threshold": 5.0,             # 5% DD from initial -> tier3
+    "daily_dd_reduce_threshold": 1.0,   # legacy: daily DD reduce
+    "daily_dd_stop_threshold": 2.0,     # daily DD stop trading
 }
 
 ACCOUNT_RULES = {"starting_balance": 6000.0, "max_drawdown_pct": 10.0}  # aligned with FundedNext 10% max DD
@@ -311,7 +315,8 @@ FUNDEDNEXT_RULES = {
 
 # Portfolio rules
 MAX_OPEN_POSITIONS = 2
-MAX_DAILY_LOSSES = 2
+MAX_DAILY_LOSSES = 2          # Max losing trades per day across all symbols
+MAX_DAILY_TRADES = 2           # Max total trades per day (matches live config)
 LEVERAGE = 100
 
 
@@ -330,16 +335,35 @@ def load_data(filename: str) -> pd.DataFrame:
     return df
 
 
-def get_adaptive_risk(current_balance: float, day_peak_balance: float):
+def get_adaptive_risk(current_balance: float, day_peak_balance: float,
+                      starting_balance: float = None):
+    """3-tier adaptive risk aligned with live DrawdownProtection.
+    
+    Uses OVERALL DD from initial balance (FundedNext Stellar rule) for tier selection,
+    plus daily DD from day-peak for stop-trading trigger.
+    """
     if not ADAPTIVE_RISK["enabled"]:
         return ADAPTIVE_RISK["default_risk_percent"], False
 
-    daily_dd_pct = ((day_peak_balance - current_balance) / day_peak_balance) * 100.0
-
+    # Daily DD check (stop trading for the day)
+    daily_dd_pct = ((day_peak_balance - current_balance) / day_peak_balance) * 100.0 if day_peak_balance > 0 else 0
     if daily_dd_pct >= ADAPTIVE_RISK["daily_dd_stop_threshold"]:
-        return ADAPTIVE_RISK["reduced_risk_percent"], True
+        return ADAPTIVE_RISK.get("tier3_risk_percent", 0.5), True
+
+    # Overall DD from initial balance (matches live `get_adaptive_risk`)
+    if starting_balance and starting_balance > 0:
+        overall_dd = ((starting_balance - current_balance) / starting_balance) * 100.0
+        overall_dd = max(0.0, overall_dd)
+        tier3_dd = ADAPTIVE_RISK.get("tier3_threshold", 5.0)
+        tier2_dd = ADAPTIVE_RISK.get("tier2_threshold", 3.0)
+        if overall_dd >= tier3_dd:
+            return ADAPTIVE_RISK.get("tier3_risk_percent", 0.5), False
+        if overall_dd >= tier2_dd:
+            return ADAPTIVE_RISK.get("tier2_risk_percent", 0.75), False
+
+    # Legacy daily DD reduce (kept for backward compat)
     if daily_dd_pct >= ADAPTIVE_RISK["daily_dd_reduce_threshold"]:
-        return ADAPTIVE_RISK["reduced_risk_percent"], False
+        return ADAPTIVE_RISK.get("tier2_risk_percent", 0.75), False
     return ADAPTIVE_RISK["default_risk_percent"], False
 
 

@@ -2,19 +2,23 @@
 FundedNext Account Simulation
 ─────────────────────────────
 Rules implemented:
-  1. Risk 1.5% per trade (normal)
-  2. If account DD reaches -2% from INITIAL capital → reduce risk to 1%
-  3. If daily floating DD from day's PEAK balance reaches -2% →
+  1. 3-tier adaptive risk from INITIAL balance:
+     - Default: 1.5% (DD 0-3%)
+     - Tier 2:  0.75% (DD 3-5%)
+     - Tier 3:  0.5%  (DD 5%+)
+  2. If daily floating DD from day's PEAK balance reaches -2% →
      close all open trades at current price & stop trading for the day
-  4. Max 2 open positions at any time
-  5. Max 2 losses per day → stop for day
+  3. Max 2 open positions at any time
+  4. Max 2 losses per day → stop for day
+  5. Max 2 trades per day
 
 FundedNext official limits:
   - Daily DD: 5% from day's starting balance (BREACH = fail)
-  - Max trailing DD: 10% from peak equity (BREACH = fail)
+  - Max DD: 10% from INITIAL capital (BREACH = fail)
+  - No time limit (but we track duration vs 60-day personal goal)
 
 When an account breaches, a NEW account starts from the next trade.
-Reports how many accounts passed vs breached.
+Reports how many accounts passed vs breached, plus duration stats.
 """
 import pandas as pd
 import numpy as np
@@ -27,16 +31,21 @@ from backtest_live_setup import (
 from strategy.strategy_ict_clean import StrategyICTClean
 
 STARTING_BALANCE = 6000.0
-RISK_DEFAULT = 1.0        # % risk per trade (base)
-RISK_AGGRESSIVE = 1.5     # % risk when in +2% profit
-RISK_DEFENSIVE = 0.75     # % risk when in -2% DD
-PROFIT_BOOST_THRESHOLD = 2.0  # increase risk when profit >= 2% from initial
-DD_REDUCE_THRESHOLD = 2.0    # reduce risk when DD from initial >= 2%
+
+# ─── 3-Tier Adaptive Risk (aligned with live config) ───
+RISK_TIER1 = 1.5          # % risk per trade (DD 0-3%)
+RISK_TIER2 = 0.75         # % risk per trade (DD 3-5%)
+RISK_TIER3 = 0.5          # % risk per trade (DD 5%+)
+DD_TIER2_THRESHOLD = 3.0  # switch to tier2 at 3% DD from initial
+DD_TIER3_THRESHOLD = 5.0  # switch to tier3 at 5% DD from initial
+
 DAILY_DD_CUTOFF = 2.0     # close all + stop when daily DD from peak >= 2%
 FUNDEDNEXT_DAILY_DD = 5.0 # official daily DD breach limit
 FUNDEDNEXT_MAX_DD = 10.0  # official max DD from INITIAL capital
 PHASE1_TARGET_PCT = 8.0   # Phase 1 profit target
 PHASE2_TARGET_PCT = 5.0   # Phase 2 profit target
+MAX_DAILY_TRADES = 2      # max trades per day (aligned with live)
+MAX_CHALLENGE_DAYS = 60   # max calendar days for entire challenge (P1+P2)
 
 ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500"]
 
@@ -197,6 +206,7 @@ def simulate_fundednext():
     day_start_balance = STARTING_BALANCE
     day_peak_balance = STARTING_BALANCE
     daily_losses_count = 0
+    daily_trade_count = 0
     day_stopped = False
 
     open_positions = []
@@ -238,6 +248,7 @@ def simulate_fundednext():
             day_start_balance = current_balance
             day_peak_balance = current_balance
             daily_losses_count = 0
+            daily_trade_count = 0
             day_stopped = False
 
         day_peak_balance = max(day_peak_balance, current_balance)
@@ -265,6 +276,7 @@ def simulate_fundednext():
                 day_start_balance = STARTING_BALANCE
                 day_peak_balance = STARTING_BALANCE
                 daily_losses_count = 0
+                daily_trade_count = 0
                 day_stopped = False
                 open_positions = []
             else:
@@ -293,6 +305,7 @@ def simulate_fundednext():
                 day_start_balance = STARTING_BALANCE
                 day_peak_balance = STARTING_BALANCE
                 daily_losses_count = 0
+                daily_trade_count = 0
                 day_stopped = False
                 open_positions = []
 
@@ -326,6 +339,7 @@ def simulate_fundednext():
             day_start_balance = STARTING_BALANCE
             day_peak_balance = STARTING_BALANCE
             daily_losses_count = 0
+            daily_trade_count = 0
             day_stopped = False
             open_positions = []
 
@@ -339,19 +353,24 @@ def simulate_fundednext():
         if daily_losses_count >= MAX_DAILY_LOSSES:
             continue
 
+        # ─── Max daily trades ───
+        if daily_trade_count >= MAX_DAILY_TRADES:
+            continue
+
         # ─── Max open positions ───
         open_positions = [p for p in open_positions if p["exit_time"] > entry_time]
         if len(open_positions) >= MAX_OPEN_POSITIONS:
             continue
 
-        # ─── Risk sizing (3-tier) ───
-        pnl_from_initial = ((current_balance - initial_balance) / initial_balance * 100) if initial_balance > 0 else 0
-        if pnl_from_initial <= -DD_REDUCE_THRESHOLD:
-            risk_pct = RISK_DEFENSIVE      # in drawdown → 0.75%
-        elif pnl_from_initial >= PROFIT_BOOST_THRESHOLD:
-            risk_pct = RISK_AGGRESSIVE     # in profit → 1.5%
+        # ─── Risk sizing (3-tier from initial balance) ───
+        dd_from_initial = ((initial_balance - current_balance) / initial_balance * 100) if initial_balance > 0 else 0
+        dd_from_initial = max(0.0, dd_from_initial)  # only positive DD
+        if dd_from_initial >= DD_TIER3_THRESHOLD:
+            risk_pct = RISK_TIER3          # deep DD → 0.5%
+        elif dd_from_initial >= DD_TIER2_THRESHOLD:
+            risk_pct = RISK_TIER2          # moderate DD → 0.75%
         else:
-            risk_pct = RISK_DEFAULT         # normal → 1.0%
+            risk_pct = RISK_TIER1          # normal → 1.5%
 
         risk_amount = current_balance * (risk_pct / 100.0)
         risk_points = float(s.risk_points)
@@ -372,6 +391,7 @@ def simulate_fundednext():
 
         if result == "loss":
             daily_losses_count += 1
+        daily_trade_count += 1
 
         if exit_time is not None:
             open_positions.append({"symbol": symbol, "exit_time": exit_time})
@@ -454,11 +474,14 @@ def simulate_fundednext():
     print(f"  Starting Balance : ${STARTING_BALANCE:,.0f}")
     print(f"  Phase 1 Target   : {PHASE1_TARGET_PCT}% (=${STARTING_BALANCE * PHASE1_TARGET_PCT / 100:,.0f})")
     print(f"  Phase 2 Target   : {PHASE2_TARGET_PCT}% (=${STARTING_BALANCE * PHASE2_TARGET_PCT / 100:,.0f})")
-    print(f"  Risk (default)   : {RISK_DEFAULT}%  |  Profit >= {PROFIT_BOOST_THRESHOLD}%: {RISK_AGGRESSIVE}%  |  DD >= {DD_REDUCE_THRESHOLD}%: {RISK_DEFENSIVE}%")
+    print(f"  Risk Tier 1      : {RISK_TIER1}% (DD 0-{DD_TIER2_THRESHOLD}%)")
+    print(f"  Risk Tier 2      : {RISK_TIER2}% (DD {DD_TIER2_THRESHOLD}-{DD_TIER3_THRESHOLD}%)")
+    print(f"  Risk Tier 3      : {RISK_TIER3}% (DD {DD_TIER3_THRESHOLD}%+)")
     print(f"  Daily Cutoff     : {DAILY_DD_CUTOFF}% from day peak -> stop")
     print(f"  FundedNext Daily : {FUNDEDNEXT_DAILY_DD}% -> BREACH")
     print(f"  FundedNext Max DD: {FUNDEDNEXT_MAX_DD}% from initial -> BREACH")
-    print(f"  Max Open Pos     : {MAX_OPEN_POSITIONS}  |  Max Daily Losses: {MAX_DAILY_LOSSES}")
+    print(f"  Duration Goal    : {MAX_CHALLENGE_DAYS} calendar days (personal, not enforced)")
+    print(f"  Max Open Pos     : {MAX_OPEN_POSITIONS}  |  Max Daily Losses: {MAX_DAILY_LOSSES}  |  Max Daily Trades: {MAX_DAILY_TRADES}")
 
     print(f"\n  {'='*58}")
     total_completed = len(passed_full) + len(breached_all)
@@ -468,6 +491,18 @@ def simulate_fundednext():
         print(f"  CHALLENGES IN PROGRESS   : {len(active_all)}")
     if total_completed > 0:
         print(f"  PASS RATE                : {len(passed_full)/total_completed*100:.0f}%")
+    if passed_full:
+        durations = [(ch["end_date"] - ch["start_date"]).days for ch in passed_full]
+        print(f"  {'─'*58}")
+        print(f"  DURATION ANALYSIS (vs {MAX_CHALLENGE_DAYS}-day personal goal):")
+        print(f"  AVG PASS DURATION        : {sum(durations)/len(durations):.0f} days")
+        print(f"  FASTEST PASS             : {min(durations)} days")
+        print(f"  SLOWEST PASS             : {max(durations)} days")
+        under_goal = sum(1 for d in durations if d <= MAX_CHALLENGE_DAYS)
+        print(f"  WITHIN {MAX_CHALLENGE_DAYS} DAYS            : {under_goal}/{len(passed_full)} ({under_goal/len(passed_full)*100:.0f}%)")
+        over_goal = [d for d in durations if d > MAX_CHALLENGE_DAYS]
+        if over_goal:
+            print(f"  OVER {MAX_CHALLENGE_DAYS} DAYS             : {len(over_goal)} (avg {sum(over_goal)/len(over_goal):.0f} days)")
     print(f"  {'='*58}")
 
     for ch in challenges:

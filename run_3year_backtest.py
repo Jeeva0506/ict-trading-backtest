@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from backtest_live_setup import (
     LIVE_INDEX_CONFIG, BROKER_POINT_VALUES, TRADING_COSTS, ADAPTIVE_RISK,
     ACCOUNT_RULES, FUNDEDNEXT_RULES, MAX_OPEN_POSITIONS, MAX_DAILY_LOSSES,
-    LEVERAGE, load_data, compute_htf_ema, get_htf_trend_for_day,
+    MAX_DAILY_TRADES, LEVERAGE, load_data, compute_htf_ema, get_htf_trend_for_day,
     get_adaptive_risk, StrategyICTClean,
 )
 
@@ -95,21 +95,30 @@ def generate_all_signals():
 
 
 def run_portfolio(all_signals):
-    """Execute portfolio backtest with full constraints."""
+    """Execute portfolio backtest with full constraints including 10% max DD enforcement."""
     STARTING_CAPITAL = ACCOUNT_RULES["starting_balance"]
+    MAX_DD_PCT = ACCOUNT_RULES.get("max_drawdown_pct", 10.0)
     current_balance = STARTING_CAPITAL
     peak_balance = STARTING_CAPITAL
 
     open_positions = []
     daily_losses = {}
+    daily_trade_counts = {}    # total trades per day (not just losses)
     all_trades = []
-    skipped_reasons = {"max_positions": 0, "daily_loss_limit": 0, "adaptive_stop": 0}
+    skipped_reasons = {"max_positions": 0, "daily_loss_limit": 0, "adaptive_stop": 0,
+                       "max_daily_trades": 0, "max_dd_breach": 0}
+    account_terminated = False
 
     current_day = None
     day_peak_balance = STARTING_CAPITAL
     day_start_balance = STARTING_CAPITAL
 
     for sig in all_signals:
+        # ── Account termination check (FundedNext 10% max DD) ──
+        if account_terminated:
+            skipped_reasons["max_dd_breach"] += 1
+            continue
+
         s = sig["signal"]
         symbol = sig["symbol"]
         point_value = sig["point_value"]
@@ -129,14 +138,20 @@ def run_portfolio(all_signals):
             skipped_reasons["daily_loss_limit"] += 1
             continue
 
+        # Constraint: max trades per day (matches live max_trades_per_day)
+        if daily_trade_counts.get(trade_day, 0) >= MAX_DAILY_TRADES:
+            skipped_reasons["max_daily_trades"] += 1
+            continue
+
         # Constraint: max open positions
         open_positions = [p for p in open_positions if p["exit_time"] > entry_time]
         if len(open_positions) >= MAX_OPEN_POSITIONS:
             skipped_reasons["max_positions"] += 1
             continue
 
-        # Adaptive risk
-        risk_pct, should_stop = get_adaptive_risk(current_balance, day_peak_balance)
+        # Adaptive risk (now uses overall DD from initial balance)
+        risk_pct, should_stop = get_adaptive_risk(current_balance, day_peak_balance,
+                                                   starting_balance=STARTING_CAPITAL)
         if should_stop:
             skipped_reasons["adaptive_stop"] += 1
             continue
@@ -186,12 +201,21 @@ def run_portfolio(all_signals):
             day_peak_balance = max(day_peak_balance, current_balance)
         peak_balance = max(peak_balance, current_balance)
 
+        # ── Max DD enforcement (FundedNext account termination) ──
+        overall_dd_pct = ((STARTING_CAPITAL - current_balance) / STARTING_CAPITAL) * 100 if STARTING_CAPITAL > 0 else 0
+        if overall_dd_pct >= MAX_DD_PCT:
+            account_terminated = True
+            print(f"  *** ACCOUNT TERMINATED: DD={overall_dd_pct:.1f}% >= {MAX_DD_PCT}% on {entry_time.date()} ***")
+
         daily_ref_post = max(day_start_balance, day_peak_balance)
         daily_dd_pct = ((daily_ref_post - current_balance) / daily_ref_post * 100) if daily_ref_post > 0 else 0
         trailing_dd_pct = ((peak_balance - current_balance) / peak_balance * 100) if peak_balance > 0 else 0
 
         if result == "loss":
             daily_losses[trade_day] = daily_losses.get(trade_day, 0) + 1
+
+        # Track total trades per day
+        daily_trade_counts[trade_day] = daily_trade_counts.get(trade_day, 0) + 1
 
         if exit_time is not None:
             open_positions.append({"symbol": symbol, "exit_time": exit_time})

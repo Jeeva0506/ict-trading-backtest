@@ -39,7 +39,7 @@ FUNDEDNEXT_RULES = {
     'daily_drawdown_percent': float(os.getenv('DAILY_DRAWDOWN', '3.0')),
     'daily_drawdown_stop': float(os.getenv('DAILY_DRAWDOWN_STOP', '2.0')),
     'risk_per_trade_percent': float(os.getenv('RISK_PER_TRADE', '1.0')),
-    'max_trades_per_day': 3,
+    'max_trades_per_day': 2,           # REDUCED from 3: limits correlated loss clusters on bad days
     'news_buffer_before_minutes': 5,    # Block 5 min BEFORE high-impact news
     'news_buffer_after_minutes': 15,    # Block 15 min AFTER high-impact news
 }
@@ -59,12 +59,21 @@ FUNDEDNEXT_RULES = {
 # To activate: uncomment FUNDED block below, comment out EVALUATION block.
 #
 # ── EVALUATION (active) ──
+# 3-tier step-down: reduces risk progressively as DD deepens
+# Tier 1: 0-3% DD → 1.5% risk (aggressive to pass fast)
+# Tier 2: 3-5% DD → 0.75% risk (protect, still trading)
+# Tier 3: 5-8% DD → 0.5% risk (survival mode)
+# Above 8% → daily_drawdown_stop kicks in, no new trades
 ADAPTIVE_RISK = {
     'enabled': True,
-    'default_risk_percent': 1.5,    # Aggressive to pass challenge fast
-    'reduced_risk_percent': 1.0,    # Conservative when in drawdown
-    'drawdown_threshold': 2.0,      # Switch to 1.0% at 2% DD
-    'recovery_threshold': 0.5,      # Switch back to 1.5% when DD < 0.5%
+    'default_risk_percent': 1.5,    # Tier 1: no DD pressure
+    'tier2_risk_percent': 0.75,     # Tier 2: moderate DD
+    'tier3_risk_percent': 0.5,      # Tier 3: deep DD, survival mode
+    'reduced_risk_percent': 0.75,   # Legacy key (backward compat) = tier2
+    'tier2_threshold': 3.0,         # Switch to tier2 at 3% DD from initial
+    'tier3_threshold': 5.0,         # Switch to tier3 at 5% DD from initial
+    'drawdown_threshold': 3.0,      # Legacy key = tier2_threshold
+    'recovery_threshold': 1.0,      # Restore to previous tier when DD recovers below this offset
 }
 #
 # ── FUNDED (activate after passing challenge) ──
