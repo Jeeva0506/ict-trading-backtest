@@ -526,6 +526,8 @@ class LiveTrader:
         # Detection log: track which symbols have been logged this session day
         # Resets in _check_daily_reset(). Prevents spamming the same info every 10s.
         self._detection_logged_today: Dict[str, bool] = {}
+        # Drift/stale signal log throttle: {symbol: count} — log first + every 10th
+        self._drift_log_count: Dict[str, int] = {}
 
         # heartbeat
         self._heartbeat_file = self.HEARTBEAT_FILE
@@ -989,6 +991,7 @@ class LiveTrader:
             for sym in self.trade_taken_today:
                 self.trade_taken_today[sym] = False
             self._detection_logged_today = {}  # reset detection log for new day
+            self._drift_log_count = {}           # reset drift log throttle
 
     # ────────────────────────────────────────────────────────────────────
     #  Connection check + reconnect  (handles network loss, MT5 crash)
@@ -1214,10 +1217,15 @@ class LiveTrader:
             mid_price = (bid + ask) / 2 if ask else bid
             drift = abs(mid_price - sig.entry_price)
             if drift > 0.5 * sig.risk_points:
-                logger.info(f"{symbol}: Signal stale - price drifted {drift:.2f} pts "
-                            f"(> 0.5R = {0.5 * sig.risk_points:.2f})")
-                self.edge_guard.record_missed_trade(
-                    symbol, f"price_drift_{drift:.1f}pts", sig.entry_price)
+                # Throttled logging: first occurrence + every 10th to avoid spam
+                cnt = self._drift_log_count.get(symbol, 0) + 1
+                self._drift_log_count[symbol] = cnt
+                if cnt == 1 or cnt % 10 == 0:
+                    logger.info(f"{symbol}: Signal stale - price drifted {drift:.2f} pts "
+                                f"(> 0.5R = {0.5 * sig.risk_points:.2f}) [x{cnt}]")
+                if cnt == 1:  # record missed trade only once
+                    self.edge_guard.record_missed_trade(
+                        symbol, f"price_drift_{drift:.1f}pts", sig.entry_price)
                 return None
 
         # Compute ORB range from session data (first orb_minutes)
@@ -1333,6 +1341,32 @@ class LiveTrader:
                 spread_pts_entry = tick_info.spread
         except Exception:
             pass
+
+        # ── SPREAD-TO-R GUARD ──────────────────────────────────────────
+        # Reject if spread > 30% of risk (R) — spread eats too much edge.
+        # SWI20 typical spread ~5.6 pts on R~6.9 = 81% → BLOCKED
+        # US2000 typical spread ~0.9 pts on R~7.7 = 12% → OK
+        MAX_SPREAD_R_PCT = 0.30  # 30% of R
+        if sig["risk_points"] > 0:
+            # Convert tick-based spread to point spread
+            sym_info = mt5.symbol_info(symbol)
+            if sym_info and sym_info.point > 0:
+                spread_points = spread_pts_entry * sym_info.point
+            else:
+                spread_points = spread_pts_entry * 0.01  # fallback
+            spread_r_ratio = spread_points / sig["risk_points"]
+            if spread_r_ratio > MAX_SPREAD_R_PCT:
+                logger.warning(
+                    f"{symbol}: SPREAD GUARD — spread={spread_points:.2f} pts "
+                    f"({spread_r_ratio:.0%} of R={sig['risk_points']:.2f}) > "
+                    f"{MAX_SPREAD_R_PCT:.0%} threshold. Trade REJECTED.")
+                self.edge_guard.record_missed_trade(
+                    symbol, f"spread_guard_{spread_r_ratio:.0%}R",
+                    sig.get('entry_price', 0))
+                self.telegram.send_message(
+                    f"⚠️ {symbol}: Trade skipped — spread {spread_points:.1f} pts "
+                    f"= {spread_r_ratio:.0%} of R (max {MAX_SPREAD_R_PCT:.0%})")
+                return
 
         t_order_start = time.perf_counter()
         result = self.mt5.place_order(

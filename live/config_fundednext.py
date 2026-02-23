@@ -285,9 +285,9 @@ PROFITABLE_INDICES = {
         'description': 'Swiss SMI 20 CFD',
         'contract_size': 10,
         'tick_size': 0.01,
-        'tick_value': 0.01,
+        'tick_value': 0.1292,        # MT5 actual: tick_value=0.1292 CHF per tick
         'currency': 'CHF',
-        'point_value': 12.95,       # CHF per point per lot (fallback; live uses broker data)
+        'point_value': 12.92,       # MT5 actual: 12.9227 CHF per point per lot
         'sl_buffer': 2.0,
         'min_sl_distance': 5.0,
         'max_sl_distance': 200.0,
@@ -325,8 +325,8 @@ PROFITABLE_INDICES = {
         'symbol': 'US2000',
         'description': 'Russell 2000 CFD',
         'contract_size': 10,
-        'tick_size': 0.01,
-        'tick_value': 0.01,
+        'tick_size': 0.1,            # MT5 actual: digits=1, tick_size=0.1
+        'tick_value': 0.1,           # MT5 actual: tick_value=0.1 USD
         'currency': 'USD',
         'point_value': 1.0,         # $ per point per lot (fallback; live uses broker data)
         'sl_buffer': 1.0,
