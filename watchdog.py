@@ -53,14 +53,56 @@ logger.addHandler(console_handler)
 # Add path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'live'))
 
-from config_fundednext import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, HEARTBEAT_URL, HEARTBEAT_INTERVAL_SECONDS
+from config_fundednext import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                               HEARTBEAT_URL, HEARTBEAT_INTERVAL_SECONDS,
+                               PROFITABLE_INDICES)
 from telegram_notifier import TelegramNotifier
 import requests as _requests
+import pytz
 
 # Lock file to prevent multiple watchdog instances
 LOCK_FILE = Path(__file__).parent / 'live' / 'logs' / 'watchdog.lock'
 HEARTBEAT_FILE = Path(__file__).parent / 'live' / 'logs' / 'heartbeat.txt'
 HEARTBEAT_STALE_SECONDS = 300  # 5 minutes without heartbeat = frozen
+
+# Buffer: start bot this many minutes before earliest market open,
+# keep running this many minutes after latest market close
+PRE_OPEN_BUFFER_MIN = 30
+POST_CLOSE_BUFFER_MIN = 15
+
+
+def is_trading_window() -> bool:
+    """
+    Returns True if the current time falls within the trading window
+    of ANY configured market (with pre-open/post-close buffers).
+    Returns False on weekends (Saturday/Sunday).
+    """
+    utc_now = datetime.now(pytz.UTC)
+
+    for symbol, config in PROFITABLE_INDICES.items():
+        try:
+            local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
+            local_now = utc_now.astimezone(local_tz)
+
+            # Skip weekends in market's local timezone
+            if local_now.weekday() >= 5:  # Saturday=5, Sunday=6
+                continue
+
+            cur_min = local_now.hour * 60 + local_now.minute
+            open_min = config['market_open_hour'] * 60 + config['market_open_minute']
+            close_min = config['market_close_hour'] * 60 + config['market_close_minute']
+
+            # Apply buffers
+            window_start = open_min - PRE_OPEN_BUFFER_MIN
+            window_end = close_min + POST_CLOSE_BUFFER_MIN
+
+            if window_start <= cur_min <= window_end:
+                return True
+        except Exception as e:
+            logger.warning(f"Trading window check failed for {symbol}: {e}")
+            continue
+
+    return False
 
 # Common MT5 installation paths
 MT5_PATHS = [
@@ -357,7 +399,7 @@ class TradingWatchdog:
     # Main loop
     # ------------------------------------------------------------------
     def run(self):
-        """Main watchdog loop"""
+        """Main watchdog loop with schedule awareness"""
         logger.info("=" * 60)
         logger.info("ORB Trading Bot Watchdog Started")
         logger.info(f"Python: {self.python_path}")
@@ -370,17 +412,48 @@ class TradingWatchdog:
             f"Monitoring: <code>{self.script_path.name}</code>"
         )
         
-        # Start the bot initially
-        if not self.start_bot():
-            logger.error("Initial bot start failed. Retrying in 30 seconds...")
-            time.sleep(30)
-            if not self.start_bot():
-                self.telegram.critical_alert("WATCHDOG ABORT", "Cannot start bot after 2 attempts.")
-                return
+        bot_was_running = False  # Track if we stopped the bot for off-hours
         
         while True:
             try:
-                time.sleep(30)  # Check every 30 seconds
+                # ── Schedule check ─────────────────────────────────────
+                if not is_trading_window():
+                    # Outside trading hours
+                    if self.is_bot_running():
+                        logger.info("Outside trading window — stopping bot")
+                        self.telegram.send_message(
+                            "🌙 <b>SCHEDULE: Off-hours</b>\n\n"
+                            "All markets closed. Stopping bot to save resources.\n"
+                            "Will auto-start before next market opens.")
+                        self.kill_bot()
+                        bot_was_running = True
+                    # Sleep longer outside trading hours (check every 5 min)
+                    time.sleep(300)
+                    self._send_heartbeat()
+                    continue
+                
+                # ── Inside trading window — ensure bot is running ──────
+                if not self.is_bot_running():
+                    if bot_was_running or self.process is None:
+                        # Bot was stopped for off-hours (or first start) — start it
+                        logger.info("Trading window active — starting bot")
+                        if not self.start_bot():
+                            logger.error("Bot start failed. Retrying in 30 seconds...")
+                            time.sleep(30)
+                            if not self.start_bot():
+                                self.telegram.critical_alert(
+                                    "BOT START FAILED",
+                                    "Cannot start bot after 2 attempts.")
+                                time.sleep(300)
+                                continue
+                        bot_was_running = False
+                        self.telegram.send_message(
+                            "☀️ <b>SCHEDULE: Markets opening</b>\n\n"
+                            "Bot started for trading session.")
+                        time.sleep(30)
+                        continue  # Skip to next iteration — let bot initialize
+                
+                time.sleep(30)  # Check every 30 seconds during trading hours
                 
                 # ── External heartbeat ping ──────────────────────────
                 self._send_heartbeat()
