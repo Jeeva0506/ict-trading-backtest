@@ -1119,6 +1119,11 @@ class LiveTrader:
                             f"(> 0.5R = {0.5 * sig.risk_points:.2f})")
                 return None
 
+        # Compute ORB range from session data (first orb_minutes)
+        orb_minutes = strategy.orb_minutes if hasattr(strategy, 'orb_minutes') else 15
+        orb_data = session_data.iloc[:orb_minutes]
+        orb_range = round(float(orb_data['high'].max()) - float(orb_data['low'].min()), 2) if len(orb_data) > 0 else 0
+
         return {
             "direction": sig.direction,
             "entry_price": sig.entry_price,
@@ -1126,6 +1131,9 @@ class LiveTrader:
             "tp": sig.tp3,                     # 2.5R single target
             "risk_points": sig.risk_points,
             "entry_time": sig.entry_time,
+            "htf_trend": htf_trend or "",
+            "orb_range": orb_range,
+            "signal_time": str(sig.entry_time),
         }
 
     # ────────────────────────────────────────────────────────────────────
@@ -1258,8 +1266,10 @@ class LiveTrader:
             "R": sig["risk_points"],
             "hit_be": False,
             "max_favorable": 0.0,
+            "max_adverse": 0.0,
             "volume": lots,
             "entry_time": str(datetime.now()),
+            "journal_trade_id": None,  # set after add_trade
         }
 
         # Verify SL is correctly set (sl_protection: 3 retries + emergency close)
@@ -1277,18 +1287,29 @@ class LiveTrader:
             return
 
         # Journal + notification
-        self.journal.add_trade({
+        trade_id = self.journal.add_trade({
             "symbol": symbol,
             "direction": order_type,
             "lot_size": lots,
+            "planned_entry": sig["entry_price"],
             "entry_price": fill_price,
             "stop_loss": sig["stop_loss"],
             "tp1": sig["tp"],
             "tp2": sig["tp"],
             "tp3": sig["tp"],
             "risk_amount": sizing.get("risk_amount", 0),
-            "notes": f"R={sig['risk_points']:.2f} slippage={slippage:.2f}",
+            "risk_points": sig["risk_points"],
+            "point_value": sizing.get("point_value", 1.0),
+            "planned_rr": 2.5,
+            "signal_time": sig.get("signal_time", ""),
+            "htf_trend": sig.get("htf_trend", ""),
+            "orb_range": sig.get("orb_range", 0),
+            "notes": f"R={sig['risk_points']:.2f} slip={slippage:+.2f}",
         })
+
+        # Link journal trade_id to tracked position for close_trade
+        if ticket in self.tracked_positions:
+            self.tracked_positions[ticket]["journal_trade_id"] = trade_id
 
         self.telegram.trade_entry(
             symbol=symbol,
@@ -1333,6 +1354,26 @@ class LiveTrader:
                 pnl = self._get_closed_trade_pnl(ticket)
                 self.state.daily_pnl += pnl
                 logger.info(f"Position {ticket} ({symbol}) closed externally, PnL: ${pnl:.2f}")
+                
+                # Journal close with MFE/MAE
+                trade_id = info.get("journal_trade_id")
+                if trade_id:
+                    mfe_pts = round(info.get("max_favorable", 0) * R, 2) if R else 0
+                    mae_pts = round(info.get("max_adverse", 0) * R, 2) if R else 0
+                    pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
+                    self.journal.close_trade(trade_id, {
+                        "exit_price": 0,  # unknown for external close
+                        "exit_reason": "External/TP/SL",
+                        "pnl": pnl,
+                        "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
+                        "pnl_points": round(pnl_pts, 2),
+                        "mfe_points": mfe_pts,
+                        "mae_points": mae_pts,
+                        "be_hit": "Yes" if info.get("hit_be") else "No",
+                        "balance_after": self.state.current_balance + pnl,
+                        "drawdown": 0,
+                    })
+                
                 self.telegram.trade_closed(
                     symbol=symbol,
                     reason="External/TP/SL",
@@ -1362,6 +1403,12 @@ class LiveTrader:
                 unrealized_r = (current_price - entry) / R if R > 0 else 0
             else:
                 unrealized_r = (entry - current_price) / R if R > 0 else 0
+
+            # Track MFE and MAE continuously
+            if unrealized_r > info.get("max_favorable", 0):
+                info["max_favorable"] = unrealized_r
+            if unrealized_r < 0 and abs(unrealized_r) > info.get("max_adverse", 0):
+                info["max_adverse"] = abs(unrealized_r)
 
             # ── Force close 15 min before session end ──────────────────
             config = get_index_config(symbol)
@@ -1407,6 +1454,26 @@ class LiveTrader:
                     if ok:
                         pnl = self._get_closed_trade_pnl(ticket)
                         self.state.daily_pnl += pnl
+                        
+                        # Journal close with MFE/MAE
+                        trade_id = info.get("journal_trade_id")
+                        if trade_id:
+                            mfe_pts = round(info.get("max_favorable", 0) * R, 2) if R else 0
+                            mae_pts = round(info.get("max_adverse", 0) * R, 2) if R else 0
+                            pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
+                            self.journal.close_trade(trade_id, {
+                                "exit_price": current_price,
+                                "exit_reason": "SESSION_CLOSE",
+                                "pnl": pnl,
+                                "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
+                                "pnl_points": round(pnl_pts, 2),
+                                "mfe_points": mfe_pts,
+                                "mae_points": mae_pts,
+                                "be_hit": "Yes" if info.get("hit_be") else "No",
+                                "balance_after": self.state.current_balance + pnl,
+                                "drawdown": 0,
+                            })
+                        
                         self.telegram.trade_closed(symbol, "SESSION_CLOSE", pnl)
                         closed_tickets.append(ticket)
                     else:
@@ -1491,6 +1558,16 @@ class LiveTrader:
         except Exception as e:
             logger.error(f"Failed to query deal history for {ticket}: {e}")
         return 0.0
+
+    def _get_point_value(self, symbol: str) -> float:
+        """Get the dollar value per point for a symbol from MT5 symbol info."""
+        try:
+            info = mt5.symbol_info(symbol)
+            if info:
+                return info.trade_tick_value / info.trade_tick_size if info.trade_tick_size else 1.0
+        except Exception:
+            pass
+        return 1.0
 
     # ────────────────────────────────────────────────────────────────────
     #  Market notifications

@@ -31,6 +31,34 @@ class TradeJournal:
         # Initialize Excel file if doesn't exist
         if not self.journal_path.exists():
             self._create_journal()
+        else:
+            self._migrate_schema()
+    
+    def _migrate_schema(self):
+        """Upgrade existing journal to new schema if needed."""
+        try:
+            wb = load_workbook(self.journal_path)
+            ws = wb["Trades"]
+            current_headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+            
+            # Detect old 20-column schema (has "Entry Price" at col F instead of "Planned Entry")
+            if "Entry Price" in current_headers and "Planned Entry" not in current_headers:
+                logger.info("Migrating trade journal from v1 (20-col) to v2 (35-col) schema...")
+                # Rename existing file as backup
+                backup = self.journal_path.with_suffix('.v1_backup.xlsx')
+                import shutil
+                shutil.copy2(self.journal_path, backup)
+                logger.info(f"Backup saved to {backup}")
+                
+                # Create new journal with updated headers
+                self._create_journal()
+                logger.info("New journal created with v2 schema. Old data preserved in backup.")
+            elif len(current_headers) < 35:
+                # Partial migration - just check header count
+                logger.info(f"Journal has {len(current_headers)} columns (expected 35). "
+                            f"Will continue with current schema.")
+        except Exception as e:
+            logger.warning(f"Schema migration check failed: {e}")
     
     def _create_journal(self):
         """Create new journal with sheets"""
@@ -40,10 +68,41 @@ class TradeJournal:
         ws_trades = wb.active
         ws_trades.title = "Trades"
         headers = [
-            "Trade ID", "Date", "Time", "Symbol", "Direction", "Entry Price",
-            "Stop Loss", "TP1", "TP2", "TP3", "Lot Size", "Risk Amount",
-            "Exit Price", "Exit Time", "Exit Reason", "P&L", "P&L %",
-            "Balance After", "Drawdown %", "Notes"
+            "Trade ID",          # A
+            "Date",              # B
+            "Time",              # C
+            "Symbol",            # D
+            "Direction",         # E
+            "Planned Entry",     # F  - strategy signal price
+            "Actual Entry",      # G  - broker fill price
+            "Slippage Pts",      # H  - points (actual - planned)
+            "Slippage $",        # I  - dollar impact
+            "Stop Loss",         # J
+            "TP",                # K
+            "Lot Size",          # L
+            "Risk Amount",       # M
+            "R (Risk Pts)",      # N  - SL distance in points
+            "Planned RR",        # O  - target RR (2.5)
+            "Signal Time",       # P  - when ORB breakout detected
+            "Fill Time",         # Q  - when order filled
+            "Exec Delay (s)",    # R  - signal-to-fill seconds
+            "HTF Trend",         # S  - H1 EMA trend at entry
+            "ORB Range",         # T  - ORB high-low range
+            "Exit Price",        # U
+            "Exit Time",         # V
+            "Exit Reason",       # W
+            "P&L",               # X
+            "P&L %",             # Y
+            "Actual RR",         # Z  - realized P&L / R
+            "MFE (pts)",         # AA - max favorable excursion
+            "MAE (pts)",         # AB - max adverse excursion
+            "MFE (R)",           # AC - MFE in R-multiples
+            "MAE (R)",           # AD - MAE in R-multiples
+            "Time in Trade",     # AE - duration string
+            "BE Hit?",           # AF - Yes/No
+            "Balance After",     # AG
+            "Drawdown %",        # AH
+            "Notes",             # AI
         ]
         ws_trades.append(headers)
         
@@ -98,61 +157,145 @@ class TradeJournal:
         trade_id = ws.max_row  # Simple incrementing ID
         
         now = datetime.now()
+        planned = trade_data.get('planned_entry', 0)
+        actual = trade_data.get('entry_price', 0)
+        slip_pts = round(actual - planned, 4) if planned and actual else 0
+        risk_pts = trade_data.get('risk_points', 0)
+        point_value = trade_data.get('point_value', 1.0)
+        lots = trade_data.get('lot_size', 0)
+        slip_dollars = round(abs(slip_pts) * point_value * lots, 2) if slip_pts else 0
+        planned_rr = trade_data.get('planned_rr', 2.5)
+
+        # Execution delay from signal time to fill
+        signal_time_str = trade_data.get('signal_time', '')
+        fill_time_str = now.strftime("%H:%M:%S")
+        exec_delay = ''
+        if signal_time_str:
+            try:
+                sig_dt = datetime.strptime(signal_time_str, "%Y-%m-%d %H:%M:%S")
+                exec_delay = round((now - sig_dt).total_seconds(), 1)
+            except Exception:
+                exec_delay = ''
+
         row = [
-            trade_id,
-            now.strftime("%Y-%m-%d"),
-            now.strftime("%H:%M:%S"),
-            trade_data.get('symbol', ''),
-            trade_data.get('direction', ''),
-            trade_data.get('entry_price', 0),
-            trade_data.get('stop_loss', 0),
-            trade_data.get('tp1', 0),
-            trade_data.get('tp2', 0),
-            trade_data.get('tp3', 0),
-            trade_data.get('lot_size', 0),
-            trade_data.get('risk_amount', 0),
-            '',  # Exit price (filled on close)
-            '',  # Exit time
-            '',  # Exit reason
-            '',  # P&L
-            '',  # P&L %
-            '',  # Balance after
-            '',  # Drawdown
-            trade_data.get('notes', '')
+            trade_id,                                        # A: Trade ID
+            now.strftime("%Y-%m-%d"),                        # B: Date
+            now.strftime("%H:%M:%S"),                        # C: Time
+            trade_data.get('symbol', ''),                     # D: Symbol
+            trade_data.get('direction', ''),                  # E: Direction
+            planned,                                         # F: Planned Entry
+            actual,                                          # G: Actual Entry
+            slip_pts,                                        # H: Slippage Pts
+            slip_dollars,                                    # I: Slippage $
+            trade_data.get('stop_loss', 0),                  # J: Stop Loss
+            trade_data.get('tp1', 0),                        # K: TP
+            lots,                                            # L: Lot Size
+            trade_data.get('risk_amount', 0),                # M: Risk Amount
+            risk_pts,                                        # N: R (Risk Pts)
+            planned_rr,                                      # O: Planned RR
+            signal_time_str,                                 # P: Signal Time
+            fill_time_str,                                   # Q: Fill Time
+            exec_delay,                                      # R: Exec Delay (s)
+            trade_data.get('htf_trend', ''),                 # S: HTF Trend
+            trade_data.get('orb_range', ''),                 # T: ORB Range
+            '',  # U: Exit Price
+            '',  # V: Exit Time
+            '',  # W: Exit Reason
+            '',  # X: P&L
+            '',  # Y: P&L %
+            '',  # Z: Actual RR
+            '',  # AA: MFE pts
+            '',  # AB: MAE pts
+            '',  # AC: MFE R
+            '',  # AD: MAE R
+            '',  # AE: Time in Trade
+            '',  # AF: BE Hit?
+            '',  # AG: Balance After
+            '',  # AH: Drawdown
+            trade_data.get('notes', ''),                     # AI: Notes
         ]
         ws.append(row)
+
+        # Color-code slippage
+        last_row = ws.max_row
+        if slip_pts != 0:
+            fill_bad = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            fill_ok = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            # Negative slippage = favorable for sells, unfavorable for buys
+            direction = trade_data.get('direction', '').lower()
+            unfavorable = (slip_pts > 0 and direction == 'buy') or (slip_pts < 0 and direction == 'sell')
+            ws.cell(row=last_row, column=8).fill = fill_bad if unfavorable else fill_ok
+
         wb.save(self.journal_path)
-        
-        logger.info(f"Trade {trade_id} added to journal")
+        logger.info(f"Trade {trade_id} added to journal (slippage: {slip_pts:+.2f} pts / ${slip_dollars:.2f})")
         return trade_id
     
     def close_trade(self, trade_id: int, exit_data: Dict):
-        """Update trade with exit information"""
+        """Update trade with exit information including MFE/MAE, actual RR, etc."""
         wb = load_workbook(self.journal_path)
         ws = wb["Trades"]
         
         # Find the trade row
         for row_num in range(2, ws.max_row + 1):
             if ws.cell(row=row_num, column=1).value == trade_id:
-                ws.cell(row=row_num, column=13, value=exit_data.get('exit_price', 0))
-                ws.cell(row=row_num, column=14, value=datetime.now().strftime("%H:%M:%S"))
-                ws.cell(row=row_num, column=15, value=exit_data.get('exit_reason', ''))
-                ws.cell(row=row_num, column=16, value=exit_data.get('pnl', 0))
-                ws.cell(row=row_num, column=17, value=exit_data.get('pnl_percent', 0))
-                ws.cell(row=row_num, column=18, value=exit_data.get('balance_after', 0))
-                ws.cell(row=row_num, column=19, value=exit_data.get('drawdown', 0))
+                pnl = exit_data.get('pnl', 0)
+                risk_pts = ws.cell(row=row_num, column=14).value  # N: R (Risk Pts)
+                risk_pts = float(risk_pts) if risk_pts else 0
+
+                # Actual RR
+                actual_rr = round(pnl / (risk_pts * exit_data.get('point_value', 1.0) * exit_data.get('lots', 1)) , 2) if risk_pts and exit_data.get('lots') else ''
+                try:
+                    # Simpler: pnl_points / R
+                    pnl_pts = exit_data.get('pnl_points', 0)
+                    actual_rr = round(pnl_pts / risk_pts, 2) if risk_pts else ''
+                except Exception:
+                    actual_rr = ''
+
+                # MFE / MAE
+                mfe_pts = exit_data.get('mfe_points', '')
+                mae_pts = exit_data.get('mae_points', '')
+                mfe_r = round(mfe_pts / risk_pts, 2) if mfe_pts and risk_pts else ''
+                mae_r = round(mae_pts / risk_pts, 2) if mae_pts and risk_pts else ''
+
+                # Time in trade
+                entry_time_str = ws.cell(row=row_num, column=3).value  # C: Time
+                entry_date_str = ws.cell(row=row_num, column=2).value  # B: Date
+                time_in_trade = ''
+                try:
+                    entry_dt = datetime.strptime(f"{entry_date_str} {entry_time_str}", "%Y-%m-%d %H:%M:%S")
+                    duration = datetime.now() - entry_dt
+                    hours, remainder = divmod(int(duration.total_seconds()), 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    time_in_trade = f"{hours}h {minutes}m"
+                except Exception:
+                    pass
+
+                # Write exit columns
+                ws.cell(row=row_num, column=21, value=exit_data.get('exit_price', 0))   # U
+                ws.cell(row=row_num, column=22, value=datetime.now().strftime("%H:%M:%S"))  # V
+                ws.cell(row=row_num, column=23, value=exit_data.get('exit_reason', ''))  # W
+                ws.cell(row=row_num, column=24, value=pnl)                               # X
+                ws.cell(row=row_num, column=25, value=exit_data.get('pnl_percent', 0))   # Y
+                ws.cell(row=row_num, column=26, value=actual_rr)                          # Z
+                ws.cell(row=row_num, column=27, value=mfe_pts)                            # AA
+                ws.cell(row=row_num, column=28, value=mae_pts)                            # AB
+                ws.cell(row=row_num, column=29, value=mfe_r)                              # AC
+                ws.cell(row=row_num, column=30, value=mae_r)                              # AD
+                ws.cell(row=row_num, column=31, value=time_in_trade)                      # AE
+                ws.cell(row=row_num, column=32, value=exit_data.get('be_hit', ''))        # AF
+                ws.cell(row=row_num, column=33, value=exit_data.get('balance_after', 0))  # AG
+                ws.cell(row=row_num, column=34, value=exit_data.get('drawdown', 0))       # AH
                 
                 # Color code P&L
-                pnl = exit_data.get('pnl', 0)
                 if pnl > 0:
-                    ws.cell(row=row_num, column=16).fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                    ws.cell(row=row_num, column=24).fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                 elif pnl < 0:
-                    ws.cell(row=row_num, column=16).fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    ws.cell(row=row_num, column=24).fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
                 
                 break
         
         wb.save(self.journal_path)
-        logger.info(f"Trade {trade_id} closed in journal")
+        logger.info(f"Trade {trade_id} closed in journal (P&L: ${exit_data.get('pnl', 0):+.2f}, RR: {actual_rr})")
     
     def get_daily_stats(self, date: str = None) -> Dict:
         """Get statistics for a specific date"""
@@ -166,13 +309,20 @@ class TradeJournal:
         for row_num in range(2, ws.max_row + 1):
             row_date = ws.cell(row=row_num, column=2).value
             if row_date == date:
-                pnl = ws.cell(row=row_num, column=16).value
+                pnl = ws.cell(row=row_num, column=24).value  # X: P&L
                 if pnl is not None and pnl != '':
                     trades.append({
                         'symbol': ws.cell(row=row_num, column=4).value,
                         'direction': ws.cell(row=row_num, column=5).value,
                         'pnl': float(pnl) if pnl else 0,
-                        'exit_reason': ws.cell(row=row_num, column=15).value
+                        'exit_reason': ws.cell(row=row_num, column=23).value,  # W
+                        'slippage_pts': ws.cell(row=row_num, column=8).value,  # H
+                        'slippage_usd': ws.cell(row=row_num, column=9).value,  # I
+                        'actual_rr': ws.cell(row=row_num, column=26).value,    # Z
+                        'mfe_r': ws.cell(row=row_num, column=29).value,        # AC
+                        'mae_r': ws.cell(row=row_num, column=30).value,        # AD
+                        'time_in_trade': ws.cell(row=row_num, column=31).value, # AE
+                        'be_hit': ws.cell(row=row_num, column=32).value,       # AF
                     })
         
         if not trades:
@@ -224,12 +374,16 @@ class TradeJournal:
                 try:
                     row_date = datetime.strptime(row_date_str, "%Y-%m-%d")
                     if start_date <= row_date <= end_date:
-                        pnl = ws.cell(row=row_num, column=16).value
+                        pnl = ws.cell(row=row_num, column=24).value  # X: P&L
                         if pnl is not None and pnl != '':
                             trades.append({
                                 'date': row_date_str,
                                 'symbol': ws.cell(row=row_num, column=4).value,
-                                'pnl': float(pnl) if pnl else 0
+                                'pnl': float(pnl) if pnl else 0,
+                                'slippage_pts': ws.cell(row=row_num, column=8).value,
+                                'actual_rr': ws.cell(row=row_num, column=26).value,
+                                'mfe_r': ws.cell(row=row_num, column=29).value,
+                                'mae_r': ws.cell(row=row_num, column=30).value,
                             })
                 except:
                     pass
@@ -249,6 +403,10 @@ class TradeJournal:
         wins = len([t for t in trades if t['pnl'] > 0])
         losses = len([t for t in trades if t['pnl'] < 0])
         pnls = [t['pnl'] for t in trades]
+        slippages = [float(t['slippage_pts']) for t in trades if t.get('slippage_pts') and t['slippage_pts'] != '']
+        rr_vals = [float(t['actual_rr']) for t in trades if t.get('actual_rr') and t['actual_rr'] != '']
+        mfe_vals = [float(t['mfe_r']) for t in trades if t.get('mfe_r') and t['mfe_r'] != '']
+        mae_vals = [float(t['mae_r']) for t in trades if t.get('mae_r') and t['mae_r'] != '']
         
         return {
             'week_start': week_start,
@@ -259,8 +417,10 @@ class TradeJournal:
             'win_rate': (wins / len(trades) * 100) if trades else 0,
             'gross_pnl': sum(pnls),
             'avg_trade': sum(pnls) / len(pnls) if pnls else 0,
-            'best_day': None,
-            'worst_day': None
+            'avg_slippage': sum(slippages) / len(slippages) if slippages else 0,
+            'avg_rr': sum(rr_vals) / len(rr_vals) if rr_vals else 0,
+            'avg_mfe_r': sum(mfe_vals) / len(mfe_vals) if mfe_vals else 0,
+            'avg_mae_r': sum(mae_vals) / len(mae_vals) if mae_vals else 0,
         }
     
     def update_daily_summary(self, date: str, balance: float, daily_dd: float, overall_dd: float):
@@ -322,10 +482,18 @@ class TradeJournal:
         # Get all-time stats
         ws_trades = wb["Trades"]
         all_trades = []
+        all_slippages = []
+        all_rr = []
         for row_num in range(2, ws_trades.max_row + 1):
-            pnl = ws_trades.cell(row=row_num, column=16).value
+            pnl = ws_trades.cell(row=row_num, column=24).value  # X: P&L
             if pnl is not None and pnl != '':
                 all_trades.append(float(pnl))
+                slip = ws_trades.cell(row=row_num, column=8).value  # H: Slippage Pts
+                if slip is not None and slip != '':
+                    all_slippages.append(float(slip))
+                rr = ws_trades.cell(row=row_num, column=26).value  # Z: Actual RR
+                if rr is not None and rr != '':
+                    all_rr.append(float(rr))
         
         total_trades = len(all_trades)
         wins = len([p for p in all_trades if p > 0])
@@ -379,8 +547,19 @@ class TradeJournal:
         pf = gross_wins / gross_losses if gross_losses > 0 else 0
         ws["B18"] = f"{pf:.2f}"
         
-        ws["A20"] = f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        ws["A20"].font = Font(italic=True, color="666666")
+        ws["A20"] = "📉 EXECUTION QUALITY"
+        ws["A20"].font = Font(size=14, bold=True)
+        
+        avg_slip = sum(all_slippages) / len(all_slippages) if all_slippages else 0
+        ws["A22"] = "Avg Slippage:"
+        ws["B22"] = f"{avg_slip:+.2f} pts"
+        
+        avg_rr = sum(all_rr) / len(all_rr) if all_rr else 0
+        ws["A23"] = "Avg R-Multiple:"
+        ws["B23"] = f"{avg_rr:.2f}R"
+        
+        ws["A25"] = f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ws["A25"].font = Font(italic=True, color="666666")
         
         wb.save(self.journal_path)
         logger.info("Dashboard updated")
@@ -422,12 +601,29 @@ class ReportScheduler:
         # Build message
         emoji = "📈" if stats['gross_pnl'] >= 0 else "📉"
         
-        # Trade breakdown
+        # Trade breakdown with slippage and RR
         trade_lines = ""
+        total_slip_pts = []
+        rr_list = []
         if stats.get('trade_details'):
             for t in stats['trade_details']:
                 t_emoji = "✅" if t['pnl'] > 0 else "❌"
-                trade_lines += f"\n   {t_emoji} {t['symbol']} {t['direction']}: ${t['pnl']:+,.2f}"
+                rr_str = f" ({t['actual_rr']}R)" if t.get('actual_rr') else ""
+                slip_str = f" slip:{t['slippage_pts']:+.1f}" if t.get('slippage_pts') else ""
+                trade_lines += f"\n   {t_emoji} {t['symbol']} {t['direction']}: ${t['pnl']:+,.2f}{rr_str}{slip_str}"
+                if t.get('slippage_pts'):
+                    total_slip_pts.append(float(t['slippage_pts']))
+                if t.get('actual_rr'):
+                    rr_list.append(float(t['actual_rr']))
+        
+        # Execution quality block
+        exec_block = ""
+        if total_slip_pts or rr_list:
+            avg_slip = sum(total_slip_pts) / len(total_slip_pts) if total_slip_pts else 0
+            avg_rr = sum(rr_list) / len(rr_list) if rr_list else 0
+            exec_block = f"""\n<b>⚡ Execution Quality:</b>
+├─ Avg Slippage: {avg_slip:+.2f} pts
+└─ Avg R-Multiple: {avg_rr:.2f}R"""
         
         message = f"""
 {emoji} <b>DAILY REPORT - {date}</b>
@@ -446,6 +642,7 @@ class ReportScheduler:
 ├─ Balance: ${balance:,.2f}
 ├─ Daily DD: {daily_dd:.2f}%
 └─ Overall DD: {overall_dd:.2f}%
+{exec_block}
 {f"<b>📋 Trades:</b>{trade_lines}" if trade_lines else ""}
 
 ━━━━━━━━━━━━━━━━━━
@@ -473,6 +670,12 @@ class ReportScheduler:
 ├─ Win Rate: {stats['win_rate']:.0f}%
 ├─ Avg Trade: ${stats['avg_trade']:+,.2f}
 └─ <b>Weekly P&L: ${stats['gross_pnl']:+,.2f}</b>
+
+<b>⚡ Execution Quality:</b>
+├─ Avg Slippage: {stats.get('avg_slippage', 0):+.2f} pts
+├─ Avg R-Multiple: {stats.get('avg_rr', 0):.2f}R
+├─ Avg MFE: {stats.get('avg_mfe_r', 0):.2f}R
+└─ Avg MAE: {stats.get('avg_mae_r', 0):.2f}R
 
 <b>💰 Account:</b>
 └─ Balance: ${balance:,.2f}
