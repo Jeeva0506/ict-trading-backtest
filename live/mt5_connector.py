@@ -291,6 +291,26 @@ class MT5Connector:
             return {"success": False, "error": result.comment, "retcode": result.retcode}
 
         logger.info(f"Order placed: {order_type.upper()} {volume} {symbol} @ {price}, SL: {sl}, TP: {tp}")
+
+        # IOC fills on some brokers (e.g. FundedNext-Server 2) return result.price=0.0
+        # Recover actual fill price from deal history
+        fill_price = result.price
+        if fill_price == 0.0 and result.deal:
+            try:
+                time.sleep(0.3)  # brief wait for deal to register in history
+                from datetime import timezone as _tz
+                _now = datetime.now(_tz.utc)
+                _start = _now - timedelta(seconds=60)
+                deals = mt5.history_deals_get(_start, _now, ticket=result.deal)
+                if deals and deals[0].price > 0:
+                    fill_price = deals[0].price
+                    logger.info(f"Fill price recovered from deal history: {fill_price}")
+            except Exception as e:
+                logger.warning(f"Could not recover fill price from deal history: {e}")
+        if fill_price == 0.0:
+            fill_price = price  # ultimate fallback: use requested price
+            logger.warning(f"Fill price still 0.0, using requested price {price} as fallback")
+
         return {
             "success": True,
             "ticket": result.order,
@@ -298,7 +318,7 @@ class MT5Connector:
             "price": price,
             "sl": sl,
             "tp": tp,
-            "fill_price": result.price,
+            "fill_price": fill_price,
         }
 
     # ── modify SL/TP ────────────────────────────────────────────────────
@@ -1332,6 +1352,10 @@ class LiveTrader:
 
         ticket = result["ticket"]
         fill_price = result.get("fill_price", result["price"])
+        # BUG FIX: IOC fills can return fill_price=0.0 on some brokers
+        if not fill_price:
+            fill_price = expected_price or result["price"]
+            logger.warning(f"{symbol}: fill_price was 0.0, using fallback={fill_price}")
 
         # Slippage monitoring
         slippage = abs(fill_price - expected_price) if expected_price else 0
@@ -1697,16 +1721,23 @@ class LiveTrader:
     #  Query deal history for closed trade PnL
     # ────────────────────────────────────────────────────────────────────
     def _get_closed_trade_pnl(self, ticket: int) -> float:
-        """Query MT5 deal history to find actual PnL of a closed position."""
+        """Query MT5 deal history to find actual PnL of a closed position.
+        Retries up to 3 times with 0.5s delay since deals may not appear
+        immediately after close (especially for IOC/emergency closes)."""
         try:
             from datetime import timezone
             # Search last 24 hours of deals
             now = datetime.now(timezone.utc)
             start = now - timedelta(days=1)
-            deals = mt5.history_deals_get(start, now, position=ticket)
-            if deals:
-                pnl = sum(d.profit + d.commission + d.swap for d in deals)
-                return pnl
+            for attempt in range(3):
+                deals = mt5.history_deals_get(start, now, position=ticket)
+                if deals:
+                    pnl = sum(d.profit + d.commission + d.swap for d in deals)
+                    if attempt > 0:
+                        logger.info(f"Deal history for {ticket} found on attempt {attempt+1}")
+                    return pnl
+                time.sleep(0.5)  # wait for deal to register
+            logger.warning(f"No deals found for ticket {ticket} after 3 attempts")
         except Exception as e:
             logger.error(f"Failed to query deal history for {ticket}: {e}")
         return 0.0
