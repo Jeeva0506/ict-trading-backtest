@@ -1777,11 +1777,23 @@ class LiveTrader:
         return 0.0
 
     def _get_point_value(self, symbol: str) -> float:
-        """Get the dollar value per point for a symbol from MT5 symbol info."""
+        """Get the dollar value per 1 index point for 1 lot from MT5.
+
+        Uses order_calc_profit (most accurate — includes contract size +
+        currency conversion) with tick_value/tick_size as fallback.
+        """
         try:
             info = mt5.symbol_info(symbol)
             if info:
-                return info.trade_tick_value / info.trade_tick_size if info.trade_tick_size else 1.0
+                # Primary: ask MT5 directly (handles contract_size + FX)
+                pv = mt5.order_calc_profit(
+                    mt5.ORDER_TYPE_BUY, symbol, 1.0,
+                    info.ask, info.ask + 1.0)
+                if pv and pv > 0:
+                    return pv
+                # Fallback: tick_value / tick_size (may miss contract_size)
+                if info.trade_tick_size > 0:
+                    return info.trade_tick_value / info.trade_tick_size
         except Exception:
             pass
         return 1.0
