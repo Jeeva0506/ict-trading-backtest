@@ -40,6 +40,8 @@ class TradeJournal:
             wb = load_workbook(self.journal_path)
             ws = wb["Trades"]
             current_headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+            header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
             
             # Detect old 20-column schema (has "Entry Price" at col F instead of "Planned Entry")
             if "Entry Price" in current_headers and "Planned Entry" not in current_headers:
@@ -53,10 +55,24 @@ class TradeJournal:
                 # Create new journal with updated headers
                 self._create_journal()
                 logger.info("New journal created with v2 schema. Old data preserved in backup.")
+                return  # fresh journal already has v3 columns
             elif len(current_headers) < 35:
                 # Partial migration - just check header count
-                logger.info(f"Journal has {len(current_headers)} columns (expected 35). "
+                logger.info(f"Journal has {len(current_headers)} columns (expected 40). "
                             f"Will continue with current schema.")
+
+            # v2 → v3 migration: add 5 edge-diagnostic columns (35 → 40)
+            current_headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+            if len(current_headers) >= 35 and "Spread Entry" not in current_headers:
+                logger.info("Migrating trade journal from v2 (35-col) to v3 (40-col)...")
+                new_cols = ["Spread Entry", "Spread Exit", "Exit Slip Pts", "Session", "Weekday"]
+                for i, hdr in enumerate(new_cols, len(current_headers) + 1):
+                    cell = ws.cell(row=1, column=i, value=hdr)
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center")
+                wb.save(self.journal_path)
+                logger.info("Migrated to v3 schema (40 columns)")
         except Exception as e:
             logger.warning(f"Schema migration check failed: {e}")
     
@@ -103,6 +119,11 @@ class TradeJournal:
             "Balance After",     # AG
             "Drawdown %",        # AH
             "Notes",             # AI
+            "Spread Entry",      # AJ - spread in broker points at entry
+            "Spread Exit",       # AK - spread in broker points at exit
+            "Exit Slip Pts",     # AL - exit slippage in points
+            "Session",           # AM - US/EU/Other
+            "Weekday",           # AN - Monday-Friday
         ]
         ws_trades.append(headers)
         
@@ -213,6 +234,11 @@ class TradeJournal:
             '',  # AG: Balance After
             '',  # AH: Drawdown
             trade_data.get('notes', ''),                     # AI: Notes
+            trade_data.get('spread_entry', ''),              # AJ: Spread Entry
+            '',                                               # AK: Spread Exit
+            '',                                               # AL: Exit Slip Pts
+            trade_data.get('session', ''),                    # AM: Session
+            trade_data.get('weekday', ''),                    # AN: Weekday
         ]
         ws.append(row)
 
@@ -285,6 +311,8 @@ class TradeJournal:
                 ws.cell(row=row_num, column=32, value=exit_data.get('be_hit', ''))        # AF
                 ws.cell(row=row_num, column=33, value=exit_data.get('balance_after', 0))  # AG
                 ws.cell(row=row_num, column=34, value=exit_data.get('drawdown', 0))       # AH
+                ws.cell(row=row_num, column=37, value=exit_data.get('spread_exit', ''))   # AK
+                ws.cell(row=row_num, column=38, value=exit_data.get('exit_slippage', '')) # AL
                 
                 # Color code P&L
                 if pnl > 0:
@@ -323,6 +351,9 @@ class TradeJournal:
                         'mae_r': ws.cell(row=row_num, column=30).value,        # AD
                         'time_in_trade': ws.cell(row=row_num, column=31).value, # AE
                         'be_hit': ws.cell(row=row_num, column=32).value,       # AF
+                        'spread_entry': ws.cell(row=row_num, column=36).value,  # AJ
+                        'session': ws.cell(row=row_num, column=39).value,       # AM
+                        'weekday': ws.cell(row=row_num, column=40).value,       # AN
                     })
         
         if not trades:

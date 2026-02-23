@@ -63,6 +63,7 @@ from sl_protection import (
     update_risk_percent as sl_update_risk,
 )
 from news_filter import EconomicCalendar
+from edge_guard import EdgeGuard
 
 # ── logging ─────────────────────────────────────────────────────────────
 logger = logging.getLogger("LiveTrader")
@@ -487,6 +488,7 @@ class LiveTrader:
         self.strategies: Dict[str, StrategyICTClean] = {}
         self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         self.journal = TradeJournal()
+        self.edge_guard = EdgeGuard()
         self.report_scheduler = ReportScheduler(self.journal, self.telegram)
 
         # position tracking:  ticket -> {symbol, direction, entry, sl_init, tp, R,
@@ -669,7 +671,8 @@ class LiveTrader:
     def _on_start(self, *a, **kw):
         self._trading_enabled = True
         self._trading_paused = False
-        logger.info("Trading STARTED via Telegram")
+        self.edge_guard.force_override()
+        logger.info("Trading STARTED via Telegram (EdgeGuard override applied)")
 
     def _on_stop(self, *a, **kw):
         self._trading_enabled = False
@@ -706,6 +709,8 @@ class LiveTrader:
             'trades_today': self.state.daily_trades,
             'tracked': len(self.tracked_positions),
             'paused': self._trading_paused,
+            'edge_guard': self.edge_guard.get_rolling_metrics(),
+            'edge_degraded': self.edge_guard.is_edge_degraded,
         }
 
     def _on_positions(self, *a, **kw) -> list:
@@ -831,6 +836,19 @@ class LiveTrader:
                 f.write(datetime.now().isoformat())
         except Exception:
             pass
+
+    # ────────────────────────────────────────────────────────────────────
+    #  Session name helper (edge diagnostics)
+    # ────────────────────────────────────────────────────────────────────
+    def _get_session_name(self, symbol: str) -> str:
+        """Map symbol to trading session name for edge diagnostics."""
+        us_symbols = {'SPX500', 'NDX100', 'US30', 'US2000'}
+        eu_symbols = {'GER30', 'SWI20'}
+        if symbol in us_symbols:
+            return "US"
+        elif symbol in eu_symbols:
+            return "EU"
+        return "Other"
 
     # ────────────────────────────────────────────────────────────────────
     #  Initialize
@@ -1113,6 +1131,7 @@ class LiveTrader:
         entry_ts = pd.Timestamp(sig.entry_time)
         bars_since_entry = len(session_data[session_data.index > entry_ts])
         if bars_since_entry > 15:
+            self.edge_guard.record_missed_trade(symbol, "stale_signal", sig.entry_price)
             return None  # signal is old
 
         # Price proximity guard: reject stale signal if market has moved
@@ -1124,6 +1143,8 @@ class LiveTrader:
             if drift > 0.5 * sig.risk_points:
                 logger.info(f"{symbol}: Signal stale - price drifted {drift:.2f} pts "
                             f"(> 0.5R = {0.5 * sig.risk_points:.2f})")
+                self.edge_guard.record_missed_trade(
+                    symbol, f"price_drift_{drift:.1f}pts", sig.entry_price)
                 return None
 
         # Compute ORB range from session data (first orb_minutes)
@@ -1173,6 +1194,10 @@ class LiveTrader:
                 if not dd["can_trade"]:
                     return False, (f"DD limit (overall={dd['overall_dd']:.1f}%, "
                                    f"daily={dd['daily_dd']:.1f}%)")
+        # Edge guard check (rolling metrics + hard rules)
+        eg_can, eg_reason = self.edge_guard.can_trade()
+        if not eg_can:
+            return False, eg_reason
         # Existing position check (1 per symbol max)
         existing = self.mt5.get_open_positions(symbol)
         if len(existing) >= 1:
@@ -1215,6 +1240,7 @@ class LiveTrader:
         lots = sizing["lots"]
         if lots <= 0:
             logger.warning(f"{symbol}: Position size = 0 lots, skipping")
+            self.edge_guard.record_missed_trade(symbol, "zero_lot_size", sig.get('entry_price', 0))
             return
 
         order_type = "buy" if sig["direction"] == "bullish" else "sell"
@@ -1224,19 +1250,31 @@ class LiveTrader:
         delay = random.uniform(1.0, 2.0)
         time.sleep(delay)
 
-        # Log expected price for slippage tracking
+        # Log expected price + spread for execution quality tracking
         bid, ask = self.mt5.get_current_price(symbol)
         expected_price = ask if order_type == "buy" else bid
+        spread_pts_entry = 0
+        try:
+            tick_info = mt5.symbol_info_tick(symbol)
+            if tick_info:
+                spread_pts_entry = tick_info.spread
+        except Exception:
+            pass
 
+        t_order_start = time.perf_counter()
         result = self.mt5.place_order(
             symbol, order_type, lots,
             sl=sig["stop_loss"], tp=sig["tp"],
             comment=comment
         )
+        exec_latency_ms = round((time.perf_counter() - t_order_start) * 1000)
 
         if not result["success"]:
             logger.error(f"{symbol}: Order failed - {result.get('error')}")
             self.telegram.order_failed(symbol, order_type, result.get("error", "Unknown"))
+            self.edge_guard.record_missed_trade(
+                symbol, f"order_failed: {result.get('error', 'unknown')}",
+                sig.get('entry_price', 0))
             return
 
         ticket = result["ticket"]
@@ -1277,6 +1315,9 @@ class LiveTrader:
             "volume": lots,
             "entry_time": str(datetime.now()),
             "journal_trade_id": None,  # set after add_trade
+            "slippage_pts": slippage,
+            "spread_entry": spread_pts_entry,
+            "exec_latency_ms": exec_latency_ms,
         }
 
         # Verify SL is correctly set (sl_protection: 3 retries + emergency close)
@@ -1311,7 +1352,10 @@ class LiveTrader:
             "signal_time": sig.get("signal_time", ""),
             "htf_trend": sig.get("htf_trend", ""),
             "orb_range": sig.get("orb_range", 0),
-            "notes": f"R={sig['risk_points']:.2f} slip={slippage:+.2f}",
+            "spread_entry": spread_pts_entry,
+            "session": self._get_session_name(symbol),
+            "weekday": datetime.now().strftime("%A"),
+            "notes": f"R={sig['risk_points']:.2f} slip={slippage:+.2f} spread={spread_pts_entry} lat={exec_latency_ms}ms",
         })
 
         # Link journal trade_id to tracked position for close_trade
@@ -1382,6 +1426,29 @@ class LiveTrader:
                         "drawdown": 0,
                     })
                 
+                # EdgeGuard: record for rolling metrics
+                _actual_rr = 0.0
+                if pos_R and info.get("volume"):
+                    _pv = self._get_point_value(symbol)
+                    _denom = pos_R * _pv * info['volume']
+                    _actual_rr = round(pnl / _denom, 2) if _denom else 0
+                self.edge_guard.record_trade({
+                    'date': datetime.now().strftime("%Y-%m-%d"),
+                    'symbol': symbol,
+                    'direction': info.get('direction', ''),
+                    'pnl': pnl,
+                    'actual_rr': _actual_rr,
+                    'slippage_pts': info.get('slippage_pts', 0),
+                    'spread_entry': info.get('spread_entry', 0),
+                    'balance_after': self.state.current_balance + pnl,
+                    'session': self._get_session_name(symbol),
+                    'weekday': datetime.now().strftime("%A"),
+                })
+                if self.edge_guard.is_edge_degraded:
+                    self.telegram.critical_alert("EDGE DEGRADED",
+                        f"Auto-stop: {'; '.join(self.edge_guard.degradation_reasons)}\n"
+                        f"Use /start to override.")
+
                 self.telegram.trade_closed(
                     symbol=symbol,
                     reason="External/TP/SL",
@@ -1483,6 +1550,30 @@ class LiveTrader:
                             })
                         
                         self.telegram.trade_closed(symbol, "SESSION_CLOSE", pnl)
+
+                        # EdgeGuard: record for rolling metrics
+                        _fc_rr = 0.0
+                        if R and info.get("volume"):
+                            _fc_pv = self._get_point_value(symbol)
+                            _fc_denom = R * _fc_pv * info['volume']
+                            _fc_rr = round(pnl / _fc_denom, 2) if _fc_denom else 0
+                        self.edge_guard.record_trade({
+                            'date': datetime.now().strftime("%Y-%m-%d"),
+                            'symbol': symbol,
+                            'direction': info.get('direction', ''),
+                            'pnl': pnl,
+                            'actual_rr': _fc_rr,
+                            'slippage_pts': info.get('slippage_pts', 0),
+                            'spread_entry': info.get('spread_entry', 0),
+                            'balance_after': self.state.current_balance + pnl,
+                            'session': self._get_session_name(symbol),
+                            'weekday': datetime.now().strftime("%A"),
+                        })
+                        if self.edge_guard.is_edge_degraded:
+                            self.telegram.critical_alert("EDGE DEGRADED",
+                                f"Auto-stop: {'; '.join(self.edge_guard.degradation_reasons)}\n"
+                                f"Use /start to override.")
+
                         closed_tickets.append(ticket)
                     else:
                         logger.error(f"FAILED to force-close {ticket} ({symbol})! "
