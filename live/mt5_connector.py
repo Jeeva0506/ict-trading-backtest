@@ -503,6 +503,10 @@ class LiveTrader:
         self._no_trade_streak: int = 0          # consecutive trading days without a trade
         self._last_trade_date: str = ""         # date string of last trade
 
+        # Detection log: track which symbols have been logged this session day
+        # Resets in _check_daily_reset(). Prevents spamming the same info every 10s.
+        self._detection_logged_today: Dict[str, bool] = {}
+
         # heartbeat
         self._heartbeat_file = self.HEARTBEAT_FILE
 
@@ -886,6 +890,7 @@ class LiveTrader:
                 max_sl_points=cfg.get("max_sl_points", 200.0),
                 tp3_r=2.5,
                 tp1_r=1.0,
+                debug=True,   # Enable detection logging for live diagnostics
             )
             self.trade_taken_today[symbol] = False
 
@@ -963,6 +968,7 @@ class LiveTrader:
             self.state.last_reset_date = today
             for sym in self.trade_taken_today:
                 self.trade_taken_today[sym] = False
+            self._detection_logged_today = {}  # reset detection log for new day
 
     # ────────────────────────────────────────────────────────────────────
     #  Connection check + reconnect  (handles network loss, MT5 crash)
@@ -1119,6 +1125,53 @@ class LiveTrader:
             return None
 
         signals = strategy.generate_signals(session_data, htf_trend=htf_trend)
+
+        # ── Detection log: log ORB diagnostics ONCE per symbol per day ──
+        if not self._detection_logged_today.get(symbol, False):
+            bars_in_session = len(session_data)
+            orb_minutes = strategy.orb_minutes if hasattr(strategy, 'orb_minutes') else 15
+            orb_slice = session_data.iloc[:orb_minutes]
+            orb_hi = float(orb_slice['high'].max()) if len(orb_slice) > 0 else 0
+            orb_lo = float(orb_slice['low'].min()) if len(orb_slice) > 0 else 0
+            orb_rng = round(orb_hi - orb_lo, 2)
+
+            # Only log once we have enough bars (past ORB formation)
+            if bars_in_session >= orb_minutes + 5:
+                debug_events = strategy.debug_rows if hasattr(strategy, 'debug_rows') else []
+                event_types = [d.get('event', '') for d in debug_events]
+                reject_reason = ''
+                for d in debug_events:
+                    if d.get('event') == 'ORB_REJECT':
+                        reject_reason = d.get('reason', 'unknown')
+                        break
+                    if d.get('event') == 'TREND_CONFLICT':
+                        reject_reason = f"HTF={d.get('htf_trend')} vs ORB={d.get('orb_bias')}"
+                        break
+
+                has_signal = '>>> SIGNAL' if signals else 'no signal'
+                entry_sig = ''
+                for d in debug_events:
+                    if d.get('event') == 'ENTRY_SIGNAL':
+                        entry_sig = (f" | Entry={d.get('dir')} @{d.get('entry')}"
+                                     f" SL={d.get('sl')} R={d.get('R')}"
+                                     f" body={d.get('body_pct')} disp={d.get('disp_ratio')}x")
+                        break
+
+                log_parts = [
+                    f"{symbol}: ORB Detection",
+                    f"bars={bars_in_session}",
+                    f"ORB={orb_lo:.2f}-{orb_hi:.2f} rng={orb_rng}",
+                    f"HTF={htf_trend or 'N/A'}",
+                ]
+                if reject_reason:
+                    log_parts.append(f"REJECT={reject_reason}")
+                log_parts.append(has_signal)
+                if entry_sig:
+                    log_parts.append(entry_sig)
+
+                logger.info(" | ".join(log_parts))
+                self._detection_logged_today[symbol] = True
+
         if not signals:
             return None
 
