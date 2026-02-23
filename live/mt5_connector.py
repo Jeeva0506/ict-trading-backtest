@@ -1356,10 +1356,11 @@ class LiveTrader:
                 logger.info(f"Position {ticket} ({symbol}) closed externally, PnL: ${pnl:.2f}")
                 
                 # Journal close with MFE/MAE
+                pos_R = info.get("R", 0)
                 trade_id = info.get("journal_trade_id")
                 if trade_id:
-                    mfe_pts = round(info.get("max_favorable", 0) * R, 2) if R else 0
-                    mae_pts = round(info.get("max_adverse", 0) * R, 2) if R else 0
+                    mfe_pts = round(info.get("max_favorable", 0) * pos_R, 2) if pos_R else 0
+                    mae_pts = round(info.get("max_adverse", 0) * pos_R, 2) if pos_R else 0
                     pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
                     self.journal.close_trade(trade_id, {
                         "exit_price": 0,  # unknown for external close

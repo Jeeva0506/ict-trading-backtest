@@ -279,7 +279,7 @@ class StrategyICTClean:
         self.debug_rows = []
         out: List[TradeSignalICT] = []
 
-        if df is None or len(df) < 80:
+        if df is None or len(df) < 30:
             return out
 
         cols = {c.lower(): c for c in df.columns}
