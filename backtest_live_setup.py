@@ -6,12 +6,14 @@ from datetime import timedelta
 from strategy.strategy_ict_clean import StrategyICTClean
 
 BROKER_POINT_VALUES = {
+    # Values = USD per 1 index point per 1 lot (from MT5 order_calc_profit)
+    # Cross-currency symbols use approximate average FX rate
     "SPX500": 10.0, "US30": 10.0, "NDX100": 10.0,
-    "GER30": 10.0, "FRA40": 10.0,
+    "GER30": 11.80, "FRA40": 10.0,       # GER30: 10 EUR/pt/lot × ~1.18 EURUSD
     "HK50": 10.0, "JP225": 10.0,
-    # New indices (tick_value / tick_size from MT5)
+    # New indices (verified via MT5 order_calc_profit 2026-02-23)
     "AUS200": 7.07, "EUSTX50": 11.81, "NTH25": 20.0,
-    "SWI20": 12.95, "UK100": 13.53, "US2000": 1.0,
+    "SWI20": 12.93, "UK100": 13.53, "US2000": 10.0,  # US2000 was 1.0 (10x off!)
 }
 
 LIVE_INDEX_CONFIG = {
