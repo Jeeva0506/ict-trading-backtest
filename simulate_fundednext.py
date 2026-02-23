@@ -47,7 +47,7 @@ PHASE2_TARGET_PCT = 5.0   # Phase 2 profit target
 MAX_DAILY_TRADES = 2      # max trades per day (aligned with live)
 MAX_CHALLENGE_DAYS = 60   # max calendar days for entire challenge (P1+P2)
 
-ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500"]
+ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500", "SWI20", "US2000"]
 
 # Clean M1-only data files (no H1 contamination)
 DATA_FILES_M1 = {
@@ -55,6 +55,8 @@ DATA_FILES_M1 = {
     "US30": "US30_M1_CLEAN.csv",
     "NDX100": "NDX100_M1_CLEAN.csv",
     "SPX500": "SPX500_M1_CLEAN.csv",
+    "SWI20": "SWI20_M1_CLEAN.csv",
+    "US2000": "US2000_M1_CLEAN.csv",
 }
 
 # Native H1 data from MT5 for EMA computation (goes back further for warmup)
@@ -63,6 +65,8 @@ DATA_FILES_H1 = {
     "US30": "US30_H1_EMA.csv",
     "NDX100": "NDX100_H1_EMA.csv",
     "SPX500": "SPX500_H1_EMA.csv",
+    "SWI20": "SWI20_H1_EMA.csv",
+    "US2000": "US2000_H1_EMA.csv",
 }
 
 

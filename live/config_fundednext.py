@@ -166,14 +166,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 200.0,
         
-        # ORB strategy params (Candidate #12 — optimized for frequency)
+        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
         'orb_minutes': 15,
         'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.3,
-        'body_min': 0.60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
         'close_strength': 0.25,
-        'breakout_margin': 0.05,
+        'breakout_margin': 0.15,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 200.0,
@@ -212,14 +212,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 200.0,
         
-        # ORB strategy params (Candidate #12 — optimized for frequency)
+        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
         'orb_minutes': 15,
         'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.3,
-        'body_min': 0.60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
         'close_strength': 0.25,
-        'breakout_margin': 0.05,
+        'breakout_margin': 0.15,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 200.0,
@@ -279,6 +279,88 @@ PROFITABLE_INDICES = {
         
         'timezone': 'America/New_York',
     },
+    
+    'SWI20': {
+        'symbol': 'SWI20',
+        'description': 'Swiss SMI 20 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'CHF',
+        'point_value': 12.95,       # CHF per point per lot (fallback; live uses broker data)
+        'sl_buffer': 2.0,
+        'min_sl_distance': 5.0,
+        'max_sl_distance': 200.0,
+        
+        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
+        'close_strength': 0.25,
+        'breakout_margin': 0.15,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 5.0,
+        'max_sl_points': 200.0,
+        
+        # Trading Hours (Local market time — CET/CEST)
+        'market_open_hour': 9,
+        'market_open_minute': 0,
+        'market_close_hour': 17,
+        'market_close_minute': 30,
+        'force_close_hour': 17,
+        'force_close_minute': 15,
+        
+        # MT5 Time (EET/EEST — SIX 9:00-17:30 CET = 10:00-18:30 EET)
+        'mt5_open_hour': 10,
+        'mt5_open_minute': 0,
+        'mt5_close_hour': 18,
+        'mt5_close_minute': 30,
+        
+        'timezone': 'Europe/Zurich',
+    },
+    
+    'US2000': {
+        'symbol': 'US2000',
+        'description': 'Russell 2000 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'USD',
+        'point_value': 1.0,         # $ per point per lot (fallback; live uses broker data)
+        'sl_buffer': 1.0,
+        'min_sl_distance': 2.0,
+        'max_sl_distance': 100.0,
+        
+        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
+        'close_strength': 0.25,
+        'breakout_margin': 0.15,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 2.0,
+        'max_sl_points': 100.0,
+        
+        # Trading Hours (Local market time — ET)
+        'market_open_hour': 9,
+        'market_open_minute': 30,
+        'market_close_hour': 16,
+        'market_close_minute': 0,
+        'force_close_hour': 15,
+        'force_close_minute': 45,
+        
+        # MT5 Time (EET/EEST — NYSE 9:30-16:00 ET = 16:30-23:00 EET)
+        'mt5_open_hour': 16,
+        'mt5_open_minute': 30,
+        'mt5_close_hour': 23,
+        'mt5_close_minute': 0,
+        
+        'timezone': 'America/New_York',
+    },
 }
 
 # ============================================================================
@@ -316,6 +398,13 @@ HIGH_IMPACT_NEWS = {
     'HKD': [
         'Hong Kong GDP',
         'Hong Kong CPI',
+    ],
+    'CHF': [
+        'SNB Interest Rate Decision',
+        'SNB Press Conference',
+        'Swiss CPI',
+        'Swiss GDP',
+        'Swiss Trade Balance',
     ],
 }
 

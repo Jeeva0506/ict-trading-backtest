@@ -3,7 +3,7 @@ FundedNext ORB Trading Bot - Main Entry Point
 ==============================================
 Run this script to start the 24/7 trading bot
 
-Indices: SPX500, NDX100, GER30, US30
+Indices: SPX500, NDX100, GER30, US30, SWI20, US2000
 Strategy: Opening Range Breakout (15-min ORB)
 
 Usage:
@@ -35,9 +35,9 @@ def show_banner():
     """Display startup banner"""
     print("""
     +==============================================================+
-    |         FUNDEDNEXT ORB TRADING BOT v2.1                     |
+    |         FUNDEDNEXT ORB TRADING BOT v2.2                     |
     |         --------------------------------                    |
-    |         SPX500 | NDX100 | GER30 | US30                     |
+    |    SPX500 | NDX100 | GER30 | US30 | SWI20 | US2000         |
     |         15-min ORB | Candidate #12 | 2.5R TP                |
     +==============================================================+
     """)

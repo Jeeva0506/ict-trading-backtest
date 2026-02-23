@@ -29,12 +29,14 @@ class EconomicCalendar:
         'forex_factory': "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     }
 
-    # Symbol to currency mapping — only backtested indices
+    # Symbol to currency mapping — all traded indices
     SYMBOL_CURRENCIES = {
         'SPX500': ['USD'],
         'NDX100': ['USD'],
         'US30': ['USD'],
+        'US2000': ['USD'],
         'GER30': ['EUR', 'USD'],  # Also affected by USD news
+        'SWI20': ['CHF', 'EUR'],  # Swiss index, also affected by EUR news
     }
 
     def __init__(self, buffer_before_minutes: int = 5,
@@ -232,7 +234,7 @@ def test_news_filter():
     print(f"Total events fetched: {len(events)}")
 
     # Check each symbol
-    for symbol in ['SPX500', 'GER30', 'NDX100', 'US30']:
+    for symbol in ['SPX500', 'GER30', 'NDX100', 'US30', 'SWI20', 'US2000']:
         is_news, event = calendar.is_news_time(symbol)
         if is_news:
             print(f"\n{symbol}: NEWS TIME")
