@@ -543,6 +543,10 @@ class LiveTrader:
 
         # market-open notification tracking
         self._prev_active: List[str] = []
+        # Per-symbol session recap: {symbol: {signal_found, signal_dir, reason, entry_price}}
+        self._session_recap: Dict[str, dict] = {}
+        # Track which sessions already sent a recap today
+        self._recap_sent_today: Dict[str, bool] = {}
 
         # error tracking
         self._consecutive_errors = 0
@@ -992,6 +996,8 @@ class LiveTrader:
                 self.trade_taken_today[sym] = False
             self._detection_logged_today = {}  # reset detection log for new day
             self._drift_log_count = {}           # reset drift log throttle
+            self._session_recap = {}             # reset session recaps
+            self._recap_sent_today = {}          # reset recap sent flags
 
     # ────────────────────────────────────────────────────────────────────
     #  Connection check + reconnect  (handles network loss, MT5 crash)
@@ -1207,7 +1213,14 @@ class LiveTrader:
         entry_ts = pd.Timestamp(sig.entry_time)
         bars_since_entry = len(session_data[session_data.index > entry_ts])
         if bars_since_entry > 15:
-            self.edge_guard.record_missed_trade(symbol, "stale_signal", sig.entry_price)
+            # Record once per symbol (not every 10s)
+            if not self._session_recap.get(symbol, {}).get('signal_found'):
+                self.edge_guard.record_missed_trade(symbol, "stale_signal", sig.entry_price)
+            self._session_recap.setdefault(symbol, {}).update({
+                'signal_found': True, 'signal_dir': sig.direction,
+                'reason': f'stale_signal ({bars_since_entry} bars old)',
+                'entry_price': sig.entry_price,
+            })
             return None  # signal is old
 
         # Price proximity guard: reject stale signal if market has moved
@@ -1226,6 +1239,11 @@ class LiveTrader:
                 if cnt == 1:  # record missed trade only once
                     self.edge_guard.record_missed_trade(
                         symbol, f"price_drift_{drift:.1f}pts", sig.entry_price)
+                self._session_recap.setdefault(symbol, {}).update({
+                    'signal_found': True, 'signal_dir': sig.direction,
+                    'reason': f'price_drift ({drift:.1f} pts > 0.5R)',
+                    'entry_price': sig.entry_price,
+                })
                 return None
 
         # Compute ORB range from session data (first orb_minutes)
@@ -1366,6 +1384,11 @@ class LiveTrader:
                 self.telegram.send_message(
                     f"⚠️ {symbol}: Trade skipped — spread {spread_points:.1f} pts "
                     f"= {spread_r_ratio:.0%} of R (max {MAX_SPREAD_R_PCT:.0%})")
+                self._session_recap.setdefault(symbol, {}).update({
+                    'signal_found': True, 'signal_dir': sig.get('direction', ''),
+                    'reason': f'spread_guard ({spread_r_ratio:.0%} of R)',
+                    'entry_price': sig.get('entry_price', 0),
+                })
                 return
 
         t_order_start = time.perf_counter()
@@ -1487,6 +1510,13 @@ class LiveTrader:
 
         logger.info(f"TRADE: {order_type.upper()} {lots} {symbol} @ {fill_price} | "
                      f"SL: {sig['stop_loss']} | TP: {sig['tp']} | R: {sig['risk_points']:.2f}")
+
+        # Record trade in session recap
+        self._session_recap.setdefault(symbol, {}).update({
+            'signal_found': True, 'signal_dir': sig['direction'],
+            'reason': 'traded', 'entry_price': fill_price,
+            'trade_taken': True, 'trade_pnl': 0,  # PnL updated on close
+        })
 
         self._save_state()
 
@@ -1806,10 +1836,65 @@ class LiveTrader:
         for s in active:
             if s not in self._prev_active:
                 logger.info(f"Market opened: {s}")
+                # Reset recap for newly opened session
+                self._session_recap[s] = {
+                    'signal_found': False, 'signal_dir': '', 'reason': 'no_signal',
+                    'entry_price': 0, 'trade_taken': False, 'trade_pnl': 0,
+                }
+                self._recap_sent_today[s] = False
+        closed_now = []
         for s in self._prev_active:
             if s not in active:
                 logger.info(f"Market closed: {s}")
+                closed_now.append(s)
+        # Send session-end recap for markets that just closed
+        if closed_now:
+            self._send_session_recap(closed_now)
         self._prev_active = active
+
+    def _send_session_recap(self, symbols: list):
+        """Send Telegram session-end recap for closed markets."""
+        try:
+            lines = []
+            for sym in symbols:
+                recap = self._session_recap.get(sym, {})
+                traded = self.trade_taken_today.get(sym, False)
+                detection = self._detection_logged_today.get(sym, False)
+
+                if traded:
+                    emoji = "\U0001f4b0"  # moneybag
+                    status = f"TRADED ({recap.get('signal_dir', '?').upper()})"
+                    pnl = recap.get('trade_pnl', 0)
+                    detail = f"P&L: ${pnl:+.2f}" if pnl != 0 else "Position may still be open"
+                elif recap.get('signal_found'):
+                    emoji = "\u26a0\ufe0f"  # warning
+                    reason = recap.get('reason', 'unknown')
+                    status = f"Signal found but NOT taken"
+                    detail = f"Reason: {reason}"
+                elif detection:
+                    emoji = "\U0001f50d"  # magnifier
+                    status = "ORB detected, no valid signal"
+                    detail = "Filters rejected (HTF/body/disp/margin)"
+                else:
+                    emoji = "\u2796"  # minus
+                    status = "No ORB detection"
+                    detail = "Insufficient data or market quiet"
+
+                lines.append(f"{emoji} <b>{sym}</b>: {status}\n   {detail}")
+
+            account = self.mt5.get_account_info()
+            bal = f"${account['balance']:,.2f}" if account else "N/A"
+
+            msg = (
+                f"\U0001f4cb <b>SESSION RECAP</b>\n\n"
+                + "\n\n".join(lines)
+                + f"\n\n\U0001f4b0 Balance: {bal}"
+                + f"\n\U0001f4c5 Daily P&L: ${self.state.daily_pnl:+.2f}"
+                + f"\n\u23f0 {ist_time()}"
+            )
+            self.telegram.send_message(msg)
+        except Exception as e:
+            logger.error(f"Session recap failed: {e}")
 
     # ────────────────────────────────────────────────────────────────────
     #  Emergency: close all on max DD breach
