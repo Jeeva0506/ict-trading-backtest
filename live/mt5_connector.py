@@ -357,12 +357,20 @@ class MT5Connector:
         p = pos[0]
         close_volume = volume if volume else p.volume
 
+        tick = mt5.symbol_info_tick(p.symbol)
+        if not tick:
+            logger.error(f"No tick data for {p.symbol} during close — retrying")
+            time.sleep(1)
+            tick = mt5.symbol_info_tick(p.symbol)
+            if not tick:
+                logger.error(f"No tick data for {p.symbol} after retry — cannot close")
+                return False
         if p.type == mt5.POSITION_TYPE_BUY:
             trade_type = mt5.ORDER_TYPE_SELL
-            price = mt5.symbol_info_tick(p.symbol).bid
+            price = tick.bid
         else:
             trade_type = mt5.ORDER_TYPE_BUY
-            price = mt5.symbol_info_tick(p.symbol).ask
+            price = tick.ask
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -508,7 +516,7 @@ class LiveTrader:
         self.strategies: Dict[str, StrategyICTClean] = {}
         self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         self.journal = TradeJournal()
-        self.edge_guard = EdgeGuard()
+        self.edge_guard = EdgeGuard(initial_balance=ACCOUNT_SIZE)
         self.report_scheduler = ReportScheduler(self.journal, self.telegram)
 
         # position tracking:  ticket -> {symbol, direction, entry, sl_init, tp, R,
@@ -1368,10 +1376,13 @@ class LiveTrader:
         if sig["risk_points"] > 0:
             # Convert tick-based spread to point spread
             sym_info = mt5.symbol_info(symbol)
-            if sym_info and sym_info.point > 0:
-                spread_points = spread_pts_entry * sym_info.point
-            else:
-                spread_points = spread_pts_entry * 0.01  # fallback
+            if not sym_info or sym_info.point <= 0:
+                logger.warning(f"{symbol}: Cannot get symbol info for spread check, skipping trade")
+                self.edge_guard.record_missed_trade(
+                    symbol, "no_symbol_info_for_spread_check",
+                    sig.get('entry_price', 0))
+                return
+            spread_points = spread_pts_entry * sym_info.point
             spread_r_ratio = spread_points / sig["risk_points"]
             if spread_r_ratio > MAX_SPREAD_R_PCT:
                 logger.warning(
@@ -1595,6 +1606,9 @@ class LiveTrader:
                     reason="External/TP/SL",
                     profit=pnl,
                 )
+                # Update session recap with actual PnL
+                if symbol in self._session_recap:
+                    self._session_recap[symbol]['trade_pnl'] = pnl
                 continue
 
             pos = mt5_tickets[ticket]
@@ -1608,7 +1622,6 @@ class LiveTrader:
             if not bid or not ask:
                 continue
 
-            current_price = bid if direction in ("buy", "sell") else bid
             if direction in ("bullish", "buy"):
                 current_price = bid  # exit price for longs
             else:
@@ -1691,6 +1704,9 @@ class LiveTrader:
                             })
                         
                         self.telegram.trade_closed(symbol, "SESSION_CLOSE", pnl)
+                        # Update session recap with actual PnL
+                        if symbol in self._session_recap:
+                            self._session_recap[symbol]['trade_pnl'] = pnl
 
                         # EdgeGuard: record for rolling metrics
                         _fc_rr = 0.0
@@ -1855,6 +1871,10 @@ class LiveTrader:
     def _send_session_recap(self, symbols: list):
         """Send Telegram session-end recap for closed markets."""
         try:
+            # Dedup: skip symbols already recapped today
+            symbols = [s for s in symbols if not self._recap_sent_today.get(s, False)]
+            if not symbols:
+                return
             lines = []
             for sym in symbols:
                 recap = self._session_recap.get(sym, {})
@@ -1893,6 +1913,9 @@ class LiveTrader:
                 + f"\n\u23f0 {ist_time()}"
             )
             self.telegram.send_message(msg)
+            # Mark as sent to prevent duplicate recaps
+            for sym in symbols:
+                self._recap_sent_today[sym] = True
         except Exception as e:
             logger.error(f"Session recap failed: {e}")
 
@@ -1904,10 +1927,37 @@ class LiveTrader:
         self.telegram.critical_alert("EMERGENCY CLOSE ALL", reason)
         positions = self.mt5.get_open_positions()
         for p in positions:
+            ticket = p["ticket"]
             for attempt in range(5):
-                if self.mt5.close_position(p["ticket"]):
+                if self.mt5.close_position(ticket):
                     break
                 time.sleep(1)
+            # Record PnL for journal + edge guard
+            try:
+                pnl = self._get_closed_trade_pnl(ticket)
+                self.state.daily_pnl += pnl
+                info = self.tracked_positions.get(ticket, {})
+                symbol = info.get("symbol", p.get("symbol", ""))
+                trade_id = info.get("journal_trade_id")
+                if trade_id:
+                    self.journal.close_trade(trade_id, {
+                        "exit_price": 0,
+                        "exit_reason": f"EMERGENCY: {reason}",
+                        "pnl": pnl,
+                        "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
+                        "balance_after": self.state.current_balance + pnl,
+                    })
+                self.edge_guard.record_trade({
+                    'date': datetime.now().strftime("%Y-%m-%d"),
+                    'symbol': symbol,
+                    'direction': info.get('direction', p.get('type', '')),
+                    'pnl': pnl,
+                    'balance_after': self.state.current_balance + pnl,
+                    'session': 'emergency',
+                })
+                logger.info(f"Emergency close {ticket} ({symbol}): PnL=${pnl:.2f}")
+            except Exception as e:
+                logger.error(f"Emergency close PnL recording failed for {ticket}: {e}")
         self.tracked_positions.clear()
         self._trading_enabled = False
 
@@ -1952,13 +2002,16 @@ class LiveTrader:
                         account.get("equity", account["balance"])
                     )
 
-                    # Warn at 80% of daily DD limit
+                    # Warn at 80% of daily DD limit (throttle: once per 30 min)
                     daily_limit = FUNDEDNEXT_RULES["daily_drawdown_stop"]
                     if dd["daily_dd"] >= daily_limit * 0.8:
-                        self.telegram.drawdown_warning(
-                            dd["daily_dd"], daily_limit,
-                            account.get("balance", 0)
-                        )
+                        _dd_last = getattr(self, '_dd_warn_sent', None)
+                        if _dd_last is None or (datetime.now() - _dd_last).total_seconds() > 1800:
+                            self.telegram.drawdown_warning(
+                                dd["daily_dd"], daily_limit,
+                                account.get("balance", 0)
+                            )
+                            self._dd_warn_sent = datetime.now()
 
                     # MAX DD breach -> emergency close all + stop
                     if dd["is_max_dd_breach"]:
@@ -2010,24 +2063,27 @@ class LiveTrader:
                 self._manage_positions()
 
                 # ── Hourly Telegram status ─────────────────────────────
-                if (datetime.now() - last_hourly_status).seconds >= 3600:
-                    account = self.mt5.get_account_info()
-                    if account:
-                        dd = self.dd_protection.update(
-                            account.get("equity", account["balance"])
-                        )
-                        self.telegram.system_status(
-                            balance=account["balance"],
-                            open_positions=len(self.tracked_positions),
-                            daily_pnl=self.state.daily_pnl,
-                            daily_dd=dd["daily_dd"],
-                            overall_dd=dd["overall_dd"],
-                            active_markets=active,
-                        )
+                if (datetime.now() - last_hourly_status).total_seconds() >= 3600:
+                    try:
+                        account = self.mt5.get_account_info()
+                        if account:
+                            dd = self.dd_protection.update(
+                                account.get("equity", account["balance"])
+                            )
+                            self.telegram.system_status(
+                                balance=account["balance"],
+                                open_positions=len(self.tracked_positions),
+                                daily_pnl=self.state.daily_pnl,
+                                daily_dd=dd["daily_dd"],
+                                overall_dd=dd["overall_dd"],
+                                active_markets=active,
+                            )
+                    except Exception as e:
+                        logger.warning(f"Hourly status Telegram failed: {e}")
                     last_hourly_status = datetime.now()
 
                 # ── 5-min status log + state save ──────────────────────
-                if (datetime.now() - last_status_log).seconds >= 300:
+                if (datetime.now() - last_status_log).total_seconds() >= 300:
                     account = self.mt5.get_account_info()
                     if account:
                         dd = self.dd_protection.update(

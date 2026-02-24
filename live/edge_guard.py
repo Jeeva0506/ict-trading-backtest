@@ -42,7 +42,7 @@ class EdgeGuard:
     MAX_SLIPPAGE_MULT = 2.0      # 2× baseline
     MAX_DRAWDOWN_SOFT_PCT = 8.0   # soft stop at 8% (before FN's 10% hard limit)
 
-    def __init__(self, data_dir: Path = None):
+    def __init__(self, data_dir: Path = None, initial_balance: float = 6000.0):
         if data_dir is None:
             data_dir = Path(__file__).parent / "logs"
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +51,7 @@ class EdgeGuard:
         self.trades: List[Dict] = []
         self.equity_curve: List[float] = []
         self.missed_trades: List[Dict] = []
+        self.initial_balance: float = initial_balance
 
         # Streak tracking
         self.loss_streak: int = 0
@@ -99,13 +100,18 @@ class EdgeGuard:
         elif record['pnl'] > 0:
             self.win_streak += 1
             self.loss_streak = 0
+        else:  # pnl == 0 (breakeven) — reset both streaks
+            self.loss_streak = 0
+            self.win_streak = 0
 
         # Update equity curve
         if record['balance_after'] > 0:
             self.equity_curve.append(record['balance_after'])
+        else:
+            logger.warning("EdgeGuard: balance_after not provided — equity tracking disabled for this trade")
 
         # Calibrate slippage baseline from first 20 trades
-        if len(self.trades) == self.MIN_TRADES_FOR_RULES and self.baseline_slippage is None:
+        if len(self.trades) >= self.MIN_TRADES_FOR_RULES and self.baseline_slippage is None:
             slips = [abs(t['slippage_pts']) for t in self.trades[:20]]
             self.baseline_slippage = sum(slips) / len(slips) if slips else 0
             logger.info(f"EdgeGuard: Slippage baseline set to {self.baseline_slippage:.2f} pts "
@@ -274,6 +280,16 @@ class EdgeGuard:
                     f"{self.MAX_SLIPPAGE_MULT}x baseline "
                     f"({self.baseline_slippage:.2f})")
 
+        # Rule 4: Drawdown > 8% from initial balance (soft stop before FN 10%)
+        if self.equity_curve:
+            current_equity = self.equity_curve[-1]
+            dd_from_initial = ((self.initial_balance - current_equity)
+                               / self.initial_balance * 100) if self.initial_balance > 0 else 0
+            if dd_from_initial >= self.MAX_DRAWDOWN_SOFT_PCT:
+                reasons.append(
+                    f"DD={dd_from_initial:.1f}% from initial "
+                    f"(${self.initial_balance:,.0f}) >= {self.MAX_DRAWDOWN_SOFT_PCT}%")
+
         was_degraded = self.is_edge_degraded
         self.is_edge_degraded = len(reasons) > 0
         self.degradation_reasons = reasons
@@ -314,6 +330,7 @@ class EdgeGuard:
                 'max_loss_streak': self.max_loss_streak,
                 'win_streak': self.win_streak,
                 'baseline_slippage': self.baseline_slippage,
+                'initial_balance': self.initial_balance,
                 'is_edge_degraded': self.is_edge_degraded,
                 'degradation_reasons': self.degradation_reasons,
                 'degraded_since': self.degraded_since,
@@ -339,6 +356,7 @@ class EdgeGuard:
             self.max_loss_streak = data.get('max_loss_streak', 0)
             self.win_streak = data.get('win_streak', 0)
             self.baseline_slippage = data.get('baseline_slippage')
+            self.initial_balance = data.get('initial_balance', self.initial_balance)
             self.is_edge_degraded = data.get('is_edge_degraded', False)
             self.degradation_reasons = data.get('degradation_reasons', [])
             self.degraded_since = data.get('degraded_since')
