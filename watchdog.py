@@ -38,17 +38,21 @@ file_handler = logging.FileHandler(log_dir / 'watchdog.log', encoding='utf-8')
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
-# Console handler with UTF-8 for Windows
-if sys.platform == 'win32':
-    console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-else:
-    console_stream = sys.stdout
-console_handler = logging.StreamHandler(console_stream)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-
 logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+
+# Console handler with UTF-8 for Windows
+# When running under pythonw.exe (Task Scheduler), stdout may not exist —
+# skip the console handler to avoid AttributeError / OSError.
+_has_console = hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None
+if _has_console:
+    if sys.platform == 'win32':
+        console_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    else:
+        console_stream = sys.stdout
+    console_handler = logging.StreamHandler(console_stream)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(console_handler)
 
 # Add path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'live'))
@@ -158,9 +162,16 @@ class TradingWatchdog:
     """Monitors and restarts the trading bot if needed"""
     
     def __init__(self):
-        # Determine Python path: prefer venv, fallback to current interpreter
-        venv_python = Path(__file__).parent.parent / '.venv' / 'Scripts' / 'python.exe'
-        self.python_path = venv_python if venv_python.exists() else Path(sys.executable)
+        # Determine Python path: prefer pythonw (no console window) > python
+        venv_dir = Path(__file__).parent.parent / '.venv' / 'Scripts'
+        venv_pythonw = venv_dir / 'pythonw.exe'
+        venv_python = venv_dir / 'python.exe'
+        if venv_pythonw.exists():
+            self.python_path = venv_pythonw
+        elif venv_python.exists():
+            self.python_path = venv_python
+        else:
+            self.python_path = Path(sys.executable)
         self.script_path = Path(__file__).parent / 'run_live.py'
         self.process = None
         self.start_time = None
@@ -191,12 +202,17 @@ class TradingWatchdog:
             stdout_f = open(stdout_log, 'a', encoding='utf-8')
             stderr_f = open(stderr_log, 'a', encoding='utf-8')
             
+            # CREATE_NO_WINDOW prevents a visible console flash on each restart
+            _flags = 0
+            if sys.platform == 'win32':
+                _flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            
             self.process = subprocess.Popen(
                 [str(self.python_path), str(self.script_path)],
                 cwd=str(self.script_path.parent),
                 stdout=stdout_f,
                 stderr=stderr_f,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0,
+                creationflags=_flags,
             )
             self._stdout_file = stdout_f
             self._stderr_file = stderr_f

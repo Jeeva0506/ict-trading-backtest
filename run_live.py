@@ -13,14 +13,20 @@ Usage:
 """
 import sys
 import io
+import os
 import argparse
 from pathlib import Path
 from datetime import datetime
 
 # Fix Windows console encoding for Unicode characters
+# Under pythonw.exe stdout/stderr may be None — redirect to devnull
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    if sys.stdout is None or not hasattr(sys.stdout, 'buffer') or sys.stdout.buffer is None:
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent))  # backtest_engine folder

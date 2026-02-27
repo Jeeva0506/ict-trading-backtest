@@ -6,11 +6,15 @@
     <URI>\ORB Trading Bot v2.2</URI>
   </RegistrationInfo>
   <Triggers>
+    <!-- Trigger 1: At system startup — 2-min delay lets desktop + network finish loading -->
     <BootTrigger>
       <Enabled>true</Enabled>
+      <Delay>PT2M</Delay>
     </BootTrigger>
+    <!-- Trigger 2: At user logon — 1-min delay avoids flicker during desktop render -->
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <Delay>PT1M</Delay>
     </LogonTrigger>
     <CalendarTrigger>
       <StartBoundary>2026-02-19T01:00:00</StartBoundary>
@@ -53,10 +57,14 @@
     <WakeToRun>true</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT5M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\.venv\Scripts\python.exe</Command>
+      <Command>C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\.venv\Scripts\pythonw.exe</Command>
       <Arguments>watchdog.py</Arguments>
       <WorkingDirectory>C:\Users\Jeeva\OneDrive\Documents\Trading_Automation\backtest_engine</WorkingDirectory>
     </Exec>

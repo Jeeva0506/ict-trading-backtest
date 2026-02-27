@@ -66,10 +66,6 @@ class StrategyICTClean:
     def __init__(
         self,
         sl_buffer: float = 1.0,
-        bos_required: int = 2,                     # kept for signature compat
-        swing_lookback: int = 5,                   # kept for signature compat
-        pullback_min_opposite_candles: int = 3,    # kept for signature compat
-        ob2_retracement: float = 0.65,             # kept for signature compat
         min_sl_points: float = 2.0,
         max_sl_points: float = 10_000.0,
         debug: bool = False,
@@ -78,19 +74,15 @@ class StrategyICTClean:
         entry_hours: int = 3,
         breakout_window_minutes: int = 60,
         lookback_ranges: int = 10,
-        disp_mult: float = 1.3,                     # C#12 default
-        vol_mult: float = 1.0,                      # kept for compat, not used
-        body_min: float = 0.60,                     # C#12 default
-        close_strength: float = 0.25,               # C#12: close must be in top/bottom 25% of candle
-        breakout_margin: float = 0.05,              # C#12: close must exceed ORB by 5% of orb_range
-        orb_range_min_mult: float = 0.5,           # min ORB range vs avg ORB candle range
+        disp_mult: float = 1.3,
+        body_min: float = 0.60,
+        close_strength: float = 0.25,
+        breakout_margin: float = 0.05,
+        orb_range_min_mult: float = 0.5,
         # --- exits ---
         tp1_r: float = 1.0,                        # BE trigger level
-        tp2_r: float = 2.5,                        # kept for compat, unused
         tp3_r: float = 2.5,                        # actual TP target
-        tp2_partial: float = 1/3,                  # kept for compat, unused
-        trail_buffer: Optional[float] = None,      # kept for compat
-        trail_window: int = 3,                     # kept for compat
+        **_kwargs,                                  # absorb legacy params from old callers
     ):
         self.sl_buffer = float(sl_buffer)
         self.min_sl = float(min_sl_points)
@@ -111,15 +103,8 @@ class StrategyICTClean:
         # Single target system
         self.be_trigger_r = float(tp1_r)       # move SL to BE at this R
         self.tp_r = float(tp3_r)               # single TP target
-
-        # compat fields (unused internally)
         self.tp1_r = float(tp1_r)
-        self.tp2_r = float(tp2_r)
         self.tp3_r = float(tp3_r)
-        self.tp2_partial = float(tp2_partial)
-        self.vol_mult = float(vol_mult)
-        self.trail_buffer = float(trail_buffer) if trail_buffer is not None else float(sl_buffer)
-        self.trail_window = int(trail_window)
 
         self.debug_rows: List[Dict[str, Any]] = []
 

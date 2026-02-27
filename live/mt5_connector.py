@@ -848,17 +848,58 @@ class LiveTrader:
                 return {'closed': 0, 'message': 'No open positions to close'}
             closed = 0
             failed = 0
+            total_pnl = 0.0
             for p in positions:
-                ok = self.mt5.close_position(p['ticket'])
+                ticket = p['ticket']
+                ok = self.mt5.close_position(ticket)
                 if ok:
                     closed += 1
-                    logger.warning(f"EMERGENCY CLOSE: {p['symbol']} ticket {p['ticket']}")
+                    logger.warning(f"EMERGENCY CLOSE: {p['symbol']} ticket {ticket}")
+                    # Record PnL and exit details in journal + telegram
+                    try:
+                        details = self._get_closed_trade_details(ticket)
+                        pnl = details['pnl']
+                        total_pnl += pnl
+                        self.state.daily_pnl += pnl
+                        info = self.tracked_positions.get(ticket, {})
+                        symbol = info.get('symbol', p.get('symbol', ''))
+                        trade_id = info.get('journal_trade_id')
+                        if trade_id:
+                            pos_R = info.get('R', 0)
+                            mfe_pts = round(info.get('max_favorable', 0) * pos_R, 2) if pos_R else 0
+                            mae_pts = round(info.get('max_adverse', 0) * pos_R, 2) if pos_R else 0
+                            pnl_pts = pnl / (info.get('volume', 1) * self._get_point_value(symbol)) if info.get('volume') else 0
+                            self.journal.close_trade(trade_id, {
+                                'exit_price': details['exit_price'],
+                                'exit_reason': 'EMERGENCY_CMD',
+                                'pnl': pnl,
+                                'pnl_percent': round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
+                                'pnl_points': round(pnl_pts, 2),
+                                'mfe_points': mfe_pts,
+                                'mae_points': mae_pts,
+                                'be_hit': 'Yes' if info.get('hit_be') else 'No',
+                                'balance_after': self.state.current_balance + pnl,
+                                'drawdown': 0,
+                            })
+                        self.telegram.trade_closed(symbol, 'EMERGENCY_CMD', pnl)
+                        self.edge_guard.record_trade({
+                            'date': datetime.now().strftime('%Y-%m-%d'),
+                            'symbol': symbol,
+                            'direction': info.get('direction', p.get('type', '')),
+                            'pnl': pnl,
+                            'balance_after': self.state.current_balance + pnl,
+                            'session': 'emergency',
+                        })
+                    except Exception as e:
+                        logger.error(f"Emergency journal/telegram failed for {ticket}: {e}")
                 else:
                     failed += 1
+            self.tracked_positions.clear()
             self._trading_paused = True
             self.telegram.critical_alert("EMERGENCY CLOSE",
                 f"All positions closed via Telegram command.\n"
-                f"Closed: {closed}, Failed: {failed}\nTrading PAUSED.")
+                f"Closed: {closed}, Failed: {failed}\n"
+                f"Total PnL: ${total_pnl:+.2f}\nTrading PAUSED.")
             return {'closed': closed, 'failed': failed, 'total': len(positions)}
         except Exception as e:
             logger.error(f"Emergency close failed: {e}")
@@ -1553,10 +1594,14 @@ class LiveTrader:
             # ── Position closed externally (TP hit, SL hit, manual) ────
             if ticket not in mt5_tickets:
                 closed_tickets.append(ticket)
-                # Query deal history for actual PnL
-                pnl = self._get_closed_trade_pnl(ticket)
+                # Query deal history for actual PnL, exit price, and reason
+                details = self._get_closed_trade_details(ticket)
+                pnl = details['pnl']
+                exit_price = details['exit_price']
+                exit_reason = details['exit_reason']
                 self.state.daily_pnl += pnl
-                logger.info(f"Position {ticket} ({symbol}) closed externally, PnL: ${pnl:.2f}")
+                logger.info(f"Position {ticket} ({symbol}) closed: {exit_reason}, "
+                            f"exit={exit_price}, PnL=${pnl:.2f}")
                 
                 # Journal close with MFE/MAE
                 pos_R = info.get("R", 0)
@@ -1566,8 +1611,8 @@ class LiveTrader:
                     mae_pts = round(info.get("max_adverse", 0) * pos_R, 2) if pos_R else 0
                     pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
                     self.journal.close_trade(trade_id, {
-                        "exit_price": 0,  # unknown for external close
-                        "exit_reason": "External/TP/SL",
+                        "exit_price": exit_price,
+                        "exit_reason": exit_reason,
                         "pnl": pnl,
                         "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
                         "pnl_points": round(pnl_pts, 2),
@@ -1603,7 +1648,7 @@ class LiveTrader:
 
                 self.telegram.trade_closed(
                     symbol=symbol,
-                    reason="External/TP/SL",
+                    reason=exit_reason,
                     profit=pnl,
                 )
                 # Update session recap with actual PnL
@@ -1804,23 +1849,44 @@ class LiveTrader:
         """Query MT5 deal history to find actual PnL of a closed position.
         Retries up to 3 times with 0.5s delay since deals may not appear
         immediately after close (especially for IOC/emergency closes)."""
+        return self._get_closed_trade_details(ticket).get('pnl', 0.0)
+
+    def _get_closed_trade_details(self, ticket: int) -> dict:
+        """Query MT5 deal history for full exit details: PnL, exit_price, exit_reason.
+        Retries up to 3 times with 0.5s delay since deals may not appear
+        immediately after close (especially for IOC/emergency closes)."""
+        result = {'pnl': 0.0, 'exit_price': 0, 'exit_reason': 'Unknown'}
         try:
             from datetime import timezone
-            # Search last 24 hours of deals
             now = datetime.now(timezone.utc)
             start = now - timedelta(days=1)
             for attempt in range(3):
                 deals = mt5.history_deals_get(start, now, position=ticket)
                 if deals:
-                    pnl = sum(d.profit + d.commission + d.swap for d in deals)
+                    result['pnl'] = sum(d.profit + d.commission + d.swap for d in deals)
+                    # Find the closing deal (DEAL_ENTRY_OUT = 1)
+                    for d in deals:
+                        if d.entry == 1:  # DEAL_ENTRY_OUT
+                            result['exit_price'] = d.price
+                            # Determine exit reason from deal reason
+                            # DEAL_REASON_SL=2, DEAL_REASON_TP=3, DEAL_REASON_CLIENT=0
+                            if d.reason == 2:
+                                result['exit_reason'] = 'SL_HIT'
+                            elif d.reason == 3:
+                                result['exit_reason'] = 'TP'
+                            elif d.reason == 0:
+                                result['exit_reason'] = 'MANUAL'
+                            else:
+                                result['exit_reason'] = f'BROKER(r={d.reason})'
+                            break
                     if attempt > 0:
                         logger.info(f"Deal history for {ticket} found on attempt {attempt+1}")
-                    return pnl
-                time.sleep(0.5)  # wait for deal to register
+                    return result
+                time.sleep(0.5)
             logger.warning(f"No deals found for ticket {ticket} after 3 attempts")
         except Exception as e:
             logger.error(f"Failed to query deal history for {ticket}: {e}")
-        return 0.0
+        return result
 
     def _get_point_value(self, symbol: str) -> float:
         """Get the dollar value per 1 index point for 1 lot from MT5.
@@ -1934,18 +2000,28 @@ class LiveTrader:
                 time.sleep(1)
             # Record PnL for journal + edge guard
             try:
-                pnl = self._get_closed_trade_pnl(ticket)
+                details = self._get_closed_trade_details(ticket)
+                pnl = details['pnl']
                 self.state.daily_pnl += pnl
                 info = self.tracked_positions.get(ticket, {})
                 symbol = info.get("symbol", p.get("symbol", ""))
                 trade_id = info.get("journal_trade_id")
                 if trade_id:
+                    pos_R = info.get('R', 0)
+                    mfe_pts = round(info.get('max_favorable', 0) * pos_R, 2) if pos_R else 0
+                    mae_pts = round(info.get('max_adverse', 0) * pos_R, 2) if pos_R else 0
+                    pnl_pts = pnl / (info.get('volume', 1) * self._get_point_value(symbol)) if info.get('volume') else 0
                     self.journal.close_trade(trade_id, {
-                        "exit_price": 0,
+                        "exit_price": details['exit_price'],
                         "exit_reason": f"EMERGENCY: {reason}",
                         "pnl": pnl,
                         "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
+                        "pnl_points": round(pnl_pts, 2),
+                        "mfe_points": mfe_pts,
+                        "mae_points": mae_pts,
+                        "be_hit": 'Yes' if info.get('hit_be') else 'No',
                         "balance_after": self.state.current_balance + pnl,
+                        "drawdown": 0,
                     })
                 self.edge_guard.record_trade({
                     'date': datetime.now().strftime("%Y-%m-%d"),

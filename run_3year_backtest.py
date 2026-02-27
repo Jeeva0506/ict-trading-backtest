@@ -19,7 +19,7 @@ from backtest_live_setup import (
     get_adaptive_risk, StrategyICTClean,
 )
 
-ALL_SYMBOLS = ["SPX500", "NDX100", "GER30", "US30"]
+ALL_SYMBOLS = ["SPX500", "NDX100", "GER30", "US30", "US2000", "SWI20"]
 
 # Override data files to use 3-year M1 data
 THREE_YEAR_FILES = {
@@ -27,6 +27,8 @@ THREE_YEAR_FILES = {
     "NDX100": "NDX100_3YEAR_M1.csv",
     "GER30":  "GER30_3YEAR_M1.csv",
     "US30":   "US30_3YEAR_M1.csv",
+    "US2000": "US2000_M1_CLEAN.csv",
+    "SWI20":  "SWI20_M1_CLEAN.csv",
 }
 
 
