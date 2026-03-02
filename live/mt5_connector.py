@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import time
 import random
+import threading
 import logging
 import json
 import requests
@@ -1593,12 +1594,23 @@ class LiveTrader:
 
             # ── Position closed externally (TP hit, SL hit, manual) ────
             if ticket not in mt5_tickets:
+                # Guard: skip if already processed this cycle
+                if ticket in closed_tickets:
+                    continue
                 closed_tickets.append(ticket)
                 # Query deal history for actual PnL, exit price, and reason
                 details = self._get_closed_trade_details(ticket)
                 pnl = details['pnl']
                 exit_price = details['exit_price']
                 exit_reason = details['exit_reason']
+
+                # Deferred re-query: if deal history failed, schedule a
+                # background retry after 10s to update journal with real P&L
+                if pnl == 0.0 and exit_price == 0:
+                    logger.warning(f"Deal history unavailable for {ticket} ({symbol}) "
+                                   f"- scheduling deferred re-query")
+                    self._schedule_deferred_pnl_update(ticket, symbol, info)
+
                 self.state.daily_pnl += pnl
                 logger.info(f"Position {ticket} ({symbol}) closed: {exit_reason}, "
                             f"exit={exit_price}, PnL=${pnl:.2f}")
@@ -1843,6 +1855,72 @@ class LiveTrader:
             self.tracked_positions.pop(t, None)
 
     # ────────────────────────────────────────────────────────────────────
+    #  Deferred P&L re-query for failed deal history lookups
+    # ────────────────────────────────────────────────────────────────────
+    def _schedule_deferred_pnl_update(self, ticket: int, symbol: str, info: dict):
+        """Schedule a background thread to re-query deal history after 10s.
+        If successful, updates the trade journal and daily P&L with the real values."""
+        def _requery():
+            time.sleep(10)  # give MT5 time to register the deal
+            details = self._get_closed_trade_details(ticket)
+            pnl = details['pnl']
+            exit_price = details['exit_price']
+            exit_reason = details['exit_reason']
+
+            if pnl == 0.0 and exit_price == 0:
+                # Still nothing — try one more time after 30s
+                time.sleep(30)
+                details = self._get_closed_trade_details(ticket)
+                pnl = details['pnl']
+                exit_price = details['exit_price']
+                exit_reason = details['exit_reason']
+
+            if pnl != 0.0 or exit_price != 0:
+                logger.info(f"Deferred re-query SUCCESS for {ticket} ({symbol}): "
+                            f"{exit_reason}, exit={exit_price}, PnL=${pnl:.2f}")
+                # Update daily P&L
+                self.state.daily_pnl += pnl
+
+                # Update journal
+                trade_id = info.get("journal_trade_id")
+                if trade_id:
+                    pos_R = info.get("R", 0)
+                    mfe_pts = round(info.get("max_favorable", 0) * pos_R, 2) if pos_R else 0
+                    mae_pts = round(info.get("max_adverse", 0) * pos_R, 2) if pos_R else 0
+                    pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
+                    self.journal.close_trade(trade_id, {
+                        "exit_price": exit_price,
+                        "exit_reason": exit_reason,
+                        "pnl": pnl,
+                        "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
+                        "pnl_points": round(pnl_pts, 2),
+                        "mfe_points": mfe_pts,
+                        "mae_points": mae_pts,
+                        "balance_after": self.state.current_balance + pnl,
+                        "drawdown": 0,
+                    })
+                    logger.info(f"Journal updated for trade #{trade_id} with deferred P&L")
+
+                # Send Telegram correction
+                self.telegram.send_message(
+                    f"<b>P&L Correction</b> ({symbol})\n"
+                    f"Ticket: {ticket}\n"
+                    f"Exit: {exit_reason} @ {exit_price}\n"
+                    f"P&L: <b>${pnl:+.2f}</b>"
+                )
+            else:
+                logger.error(f"Deferred re-query FAILED for {ticket} ({symbol}) "
+                             f"- P&L will remain $0 in journal. Check MT5 manually.")
+                self.telegram.send_message(
+                    f"⚠️ <b>P&L Recording Failed</b>\n"
+                    f"{symbol} ticket {ticket}\n"
+                    f"Deal history unavailable. Check MT5 manually."
+                )
+
+        t = threading.Thread(target=_requery, daemon=True, name=f"pnl_requery_{ticket}")
+        t.start()
+
+    # ────────────────────────────────────────────────────────────────────
     #  Query deal history for closed trade PnL
     # ────────────────────────────────────────────────────────────────────
     def _get_closed_trade_pnl(self, ticket: int) -> float:
@@ -1853,14 +1931,15 @@ class LiveTrader:
 
     def _get_closed_trade_details(self, ticket: int) -> dict:
         """Query MT5 deal history for full exit details: PnL, exit_price, exit_reason.
-        Retries up to 3 times with 0.5s delay since deals may not appear
-        immediately after close (especially for IOC/emergency closes)."""
+        Retries up to 6 times with 1.0s delay (total ~6s wait) since deals
+        may not appear immediately after close on some brokers.
+        Uses 7-day lookback window to handle weekend rollover."""
         result = {'pnl': 0.0, 'exit_price': 0, 'exit_reason': 'Unknown'}
         try:
             from datetime import timezone
             now = datetime.now(timezone.utc)
-            start = now - timedelta(days=1)
-            for attempt in range(3):
+            start = now - timedelta(days=7)  # wider window for weekend rollover
+            for attempt in range(6):
                 deals = mt5.history_deals_get(start, now, position=ticket)
                 if deals:
                     result['pnl'] = sum(d.profit + d.commission + d.swap for d in deals)
@@ -1882,8 +1961,8 @@ class LiveTrader:
                     if attempt > 0:
                         logger.info(f"Deal history for {ticket} found on attempt {attempt+1}")
                     return result
-                time.sleep(0.5)
-            logger.warning(f"No deals found for ticket {ticket} after 3 attempts")
+                time.sleep(1.0)
+            logger.warning(f"No deals found for ticket {ticket} after 6 attempts")
         except Exception as e:
             logger.error(f"Failed to query deal history for {ticket}: {e}")
         return result
