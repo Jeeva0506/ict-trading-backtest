@@ -280,46 +280,9 @@ PROFITABLE_INDICES = {
         'timezone': 'America/New_York',
     },
     
-    'SWI20': {
-        'symbol': 'SWI20',
-        'description': 'Swiss SMI 20 CFD',
-        'contract_size': 10,
-        'tick_size': 0.01,
-        'tick_value': 0.1292,        # MT5 actual: tick_value=0.1292 CHF per tick
-        'currency': 'CHF',
-        'point_value': 12.92,       # MT5 actual: 12.9227 CHF per point per lot
-        'sl_buffer': 2.0,
-        'min_sl_distance': 5.0,
-        'max_sl_distance': 200.0,
-        
-        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
-        'orb_minutes': 15,
-        'entry_hours': 2,
-        'breakout_window_minutes': 60,
-        'disp_mult': 1.0,
-        'body_min': 0.70,
-        'close_strength': 0.25,
-        'breakout_margin': 0.15,
-        'orb_range_min_mult': 0.5,
-        'min_sl_points': 5.0,
-        'max_sl_points': 200.0,
-        
-        # Trading Hours (Local market time — CET/CEST)
-        'market_open_hour': 9,
-        'market_open_minute': 0,
-        'market_close_hour': 17,
-        'market_close_minute': 30,
-        'force_close_hour': 17,
-        'force_close_minute': 15,
-        
-        # MT5 Time (EET/EEST — SIX 9:00-17:30 CET = 10:00-18:30 EET)
-        'mt5_open_hour': 10,
-        'mt5_open_minute': 0,
-        'mt5_close_hour': 18,
-        'mt5_close_minute': 30,
-        
-        'timezone': 'Europe/Zurich',
-    },
+    # SWI20 removed — spread too wide (3-5.6 pts) eats 43-81% of R,
+    # only 13/113 trades pass spread guard, marginal +$203 over 3yr.
+    # 'SWI20': { ... },
     
     'US2000': {
         'symbol': 'US2000',

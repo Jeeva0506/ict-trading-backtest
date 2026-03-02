@@ -923,7 +923,7 @@ class LiveTrader:
     def _get_session_name(self, symbol: str) -> str:
         """Map symbol to trading session name for edge diagnostics."""
         us_symbols = {'SPX500', 'NDX100', 'US30', 'US2000'}
-        eu_symbols = {'GER30', 'SWI20'}
+        eu_symbols = {'GER30'}
         if symbol in us_symbols:
             return "US"
         elif symbol in eu_symbols:
@@ -1412,7 +1412,6 @@ class LiveTrader:
 
         # ── SPREAD-TO-R GUARD ──────────────────────────────────────────
         # Reject if spread > 30% of risk (R) — spread eats too much edge.
-        # SWI20 typical spread ~5.6 pts on R~6.9 = 81% → BLOCKED
         # US2000 typical spread ~0.9 pts on R~7.7 = 12% → OK
         MAX_SPREAD_R_PCT = 0.30  # 30% of R
         if sig["risk_points"] > 0:

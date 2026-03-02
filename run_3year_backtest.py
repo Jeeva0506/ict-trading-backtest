@@ -108,7 +108,8 @@ def run_portfolio(all_signals):
     daily_trade_counts = {}    # total trades per day (not just losses)
     all_trades = []
     skipped_reasons = {"max_positions": 0, "daily_loss_limit": 0, "adaptive_stop": 0,
-                       "max_daily_trades": 0, "max_dd_breach": 0}
+                       "max_daily_trades": 0, "max_dd_breach": 0,
+                       "spread_guard": 0, "price_drift": 0, "stale_signal": 0}
     account_terminated = False
 
     current_day = None
@@ -127,6 +128,7 @@ def run_portfolio(all_signals):
         entry_time = sig["entry_time"]
         exit_time = sig["exit_time"]
         trade_day = entry_time.date()
+        risk_points = float(s.risk_points)
 
         if trade_day != current_day:
             current_day = trade_day
@@ -151,6 +153,34 @@ def run_portfolio(all_signals):
             skipped_reasons["max_positions"] += 1
             continue
 
+        # ── LIVE FILTER: Spread-to-R guard (30%) ──────────────────────
+        # Rejects trades where spread eats too much of the risk (R).
+        # SWI20 spread=3.0 pts on R~6.9 → 43% → BLOCKED
+        spread_pts = TRADING_COSTS["spread_points"].get(symbol, 1.0)
+        if risk_points > 0 and (spread_pts / risk_points) > 0.30:
+            skipped_reasons["spread_guard"] += 1
+            continue
+
+        # ── LIVE FILTER: Stale signal guard (>15 bars) ────────────────
+        # Rejects signals where the entry bar is >15 M1 bars after the
+        # breakout candle. Simulates live bot scanning delay / restarts.
+        breakout_time = getattr(s, 'breakout_time', None)
+        if breakout_time is not None:
+            bars_delay = int((pd.Timestamp(s.entry_time) - pd.Timestamp(breakout_time)).total_seconds() / 60)
+            if bars_delay > 15:
+                skipped_reasons["stale_signal"] += 1
+                continue
+
+        # ── LIVE FILTER: Price drift guard (relaxed 1.0R) ─────────────
+        # Rejects if actual entry (next-bar open) drifted too far from
+        # signal price (breakout/retest candle close). Live uses 0.5R.
+        signal_price = getattr(s, 'signal_price', None)
+        if signal_price is not None and risk_points > 0:
+            drift = abs(float(s.entry_price) - float(signal_price))
+            if drift > 1.0 * risk_points:
+                skipped_reasons["price_drift"] += 1
+                continue
+
         # Adaptive risk (now uses overall DD from initial balance)
         risk_pct, should_stop = get_adaptive_risk(current_balance, day_peak_balance,
                                                    starting_balance=STARTING_CAPITAL)
@@ -160,7 +190,6 @@ def run_portfolio(all_signals):
 
         # Position sizing
         risk_amount = current_balance * (risk_pct / 100.0)
-        risk_points = float(s.risk_points)
         if risk_points <= 0:
             continue
 

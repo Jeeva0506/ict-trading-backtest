@@ -24,6 +24,8 @@ class TradeSignalICT:
     exit_price: float = None
     exit_reason: str = None        # TP, SL_BE, SL_HIT, SESSION_CLOSE
     pnl_points: float = 0.0        # realized PnL in points
+    signal_price: float = None     # breakout/retest candle close (for drift calc)
+    breakout_time: Any = None      # breakout candle timestamp (for stale calc)
 
 
 class StrategyICTClean:
@@ -463,6 +465,12 @@ class StrategyICTClean:
                 disp_ratio=round(candle_range / avg_r, 2),
             )
 
+            # Determine signal price (trigger candle close) for drift calculation
+            if retest_found:
+                signal_close = float(w.iloc[next_idx - 1]["close"])  # retest candle close
+            else:
+                signal_close = c  # breakout candle close
+
             trade = self._simulate_trade(
                 df=w,
                 start_idx=next_idx + 1,  # simulate from bar AFTER entry
@@ -472,6 +480,8 @@ class StrategyICTClean:
                 R=R,
                 cutoff_time=cutoff_close,
             )
+            trade.signal_price = signal_close
+            trade.breakout_time = ts  # breakout candle timestamp
             out.append(trade)
             break  # 1 trade per day
 
