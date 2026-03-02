@@ -22,6 +22,8 @@ Manual override via Telegram /start to resume after auto-stop.
 """
 import json
 import logging
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -339,7 +341,29 @@ class EdgeGuard:
             tmp = self.data_file.with_suffix('.tmp')
             with open(tmp, 'w') as f:
                 json.dump(data, f, indent=2)
-            tmp.replace(self.data_file)
+
+            # Retry rename — OneDrive can lock the target file during sync
+            for attempt in range(5):
+                try:
+                    tmp.replace(self.data_file)
+                    return  # success
+                except (PermissionError, OSError):
+                    if attempt < 4:
+                        time.sleep(0.3 * (attempt + 1))
+            # All retries failed — fall back to direct overwrite
+            try:
+                if self.data_file.exists():
+                    os.remove(str(self.data_file))
+                    time.sleep(0.2)
+                tmp.replace(self.data_file)
+            except Exception:
+                # Last resort: write directly (non-atomic but better than losing data)
+                with open(self.data_file, 'w') as f:
+                    json.dump(data, f, indent=2)
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"EdgeGuard: Failed to save: {e}")
 
