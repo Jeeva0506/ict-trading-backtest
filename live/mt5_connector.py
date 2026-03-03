@@ -1403,6 +1403,28 @@ class LiveTrader:
         order_type = "buy" if sig["direction"] == "bullish" else "sell"
         comment = f"ORB_{symbol}"
 
+        # ── MINIMUM R GUARD ───────────────────────────────────────────
+        # Reject signals where R is too small for live execution.
+        # Tiny R (e.g. 2.4 pts on US2000) means spread + slippage eat
+        # most of the risk budget, guaranteeing > 1R losses.
+        MIN_R_POINTS = 5.0  # minimum 5 points risk for any symbol
+        if sig["risk_points"] < MIN_R_POINTS:
+            logger.warning(
+                f"{symbol}: MIN R GUARD — R={sig['risk_points']:.2f} pts < "
+                f"{MIN_R_POINTS} minimum. Trade REJECTED.")
+            self.edge_guard.record_missed_trade(
+                symbol, f"min_R_{sig['risk_points']:.1f}pts",
+                sig.get('entry_price', 0))
+            self.telegram.send_message(
+                f"⚠️ {symbol}: Trade skipped — R={sig['risk_points']:.1f} pts "
+                f"too small (min {MIN_R_POINTS} pts)")
+            self._session_recap.setdefault(symbol, {}).update({
+                'signal_found': True, 'signal_dir': sig.get('direction', ''),
+                'reason': f'min_R ({sig["risk_points"]:.1f} pts < {MIN_R_POINTS})',
+                'entry_price': sig.get('entry_price', 0),
+            })
+            return
+
         # Random delay 1-2s (prop-firm detection avoidance)
         delay = random.uniform(1.0, 2.0)
         time.sleep(delay)
