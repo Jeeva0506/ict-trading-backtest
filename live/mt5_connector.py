@@ -296,6 +296,7 @@ class MT5Connector:
         # IOC fills on some brokers (e.g. FundedNext-Server 2) return result.price=0.0
         # Recover actual fill price from deal history
         fill_price = result.price
+        position_id = result.order  # default: assume position_id = order_id
         if fill_price == 0.0 and result.deal:
             try:
                 time.sleep(0.3)  # brief wait for deal to register in history
@@ -306,6 +307,11 @@ class MT5Connector:
                 if deals and deals[0].price > 0:
                     fill_price = deals[0].price
                     logger.info(f"Fill price recovered from deal history: {fill_price}")
+                # Recover position_id from deal (may differ from order_id on some brokers)
+                if deals and hasattr(deals[0], 'position_id') and deals[0].position_id:
+                    position_id = deals[0].position_id
+                    if position_id != result.order:
+                        logger.info(f"Position ID {position_id} differs from order ID {result.order}")
             except Exception as e:
                 logger.warning(f"Could not recover fill price from deal history: {e}")
         if fill_price == 0.0:
@@ -315,6 +321,7 @@ class MT5Connector:
         return {
             "success": True,
             "ticket": result.order,
+            "position_id": position_id,
             "volume": volume,
             "price": price,
             "sl": sl,
@@ -858,12 +865,13 @@ class LiveTrader:
                     logger.warning(f"EMERGENCY CLOSE: {p['symbol']} ticket {ticket}")
                     # Record PnL and exit details in journal + telegram
                     try:
-                        details = self._get_closed_trade_details(ticket)
+                        info = self.tracked_positions.get(ticket, {})
+                        symbol = info.get('symbol', p.get('symbol', ''))
+                        pos_id = info.get('position_id', ticket)
+                        details = self._get_closed_trade_details(pos_id, expected_symbol=symbol)
                         pnl = details['pnl']
                         total_pnl += pnl
                         self.state.daily_pnl += pnl
-                        info = self.tracked_positions.get(ticket, {})
-                        symbol = info.get('symbol', p.get('symbol', ''))
                         trade_id = info.get('journal_trade_id')
                         if trade_id:
                             pos_R = info.get('R', 0)
@@ -1410,6 +1418,31 @@ class LiveTrader:
         except Exception:
             pass
 
+        # ── PRE-ORDER DRIFT RECHECK ───────────────────────────────────
+        # Price may have moved during the 1-2s anti-detection delay.
+        # Recheck drift from signal entry — reject if price drifted > 0.5R
+        # This prevents placing orders with inflated SL distance.
+        if expected_price and sig["risk_points"] > 0:
+            drift_from_signal = abs(expected_price - sig["entry_price"])
+            if drift_from_signal > 0.5 * sig["risk_points"]:
+                logger.warning(
+                    f"{symbol}: PRE-ORDER DRIFT — price moved {drift_from_signal:.2f} pts "
+                    f"from signal entry ({sig['entry_price']:.2f}) during delay. "
+                    f"Threshold 0.5R = {0.5 * sig['risk_points']:.2f}. Trade REJECTED.")
+                self.edge_guard.record_missed_trade(
+                    symbol, f"pre_order_drift_{drift_from_signal:.1f}pts",
+                    sig.get('entry_price', 0))
+                self.telegram.send_message(
+                    f"⚠️ {symbol}: Trade skipped — price drifted "
+                    f"{drift_from_signal:.1f} pts from signal entry during delay "
+                    f"(> 0.5R = {0.5 * sig['risk_points']:.1f})")
+                self._session_recap.setdefault(symbol, {}).update({
+                    'signal_found': True, 'signal_dir': sig.get('direction', ''),
+                    'reason': f'pre_order_drift ({drift_from_signal:.1f} pts > 0.5R)',
+                    'entry_price': sig.get('entry_price', 0),
+                })
+                return
+
         # ── SPREAD-TO-R GUARD ──────────────────────────────────────────
         # Reject if spread > 30% of risk (R) — spread eats too much edge.
         # US2000 typical spread ~0.9 pts on R~7.7 = 12% → OK
@@ -1460,6 +1493,7 @@ class LiveTrader:
             return
 
         ticket = result["ticket"]
+        position_id = result.get("position_id", ticket)
         fill_price = result.get("fill_price", result["price"])
         # BUG FIX: IOC fills can return fill_price=0.0 on some brokers
         if not fill_price:
@@ -1471,6 +1505,57 @@ class LiveTrader:
         if slippage > 0:
             logger.info(f"{symbol}: Slippage = {slippage:.2f} points "
                         f"(expected {expected_price}, got {fill_price})")
+
+        # ── POST-FILL RISK GUARD ──────────────────────────────────────
+        # If actual SL distance exceeds 1.5× designed R, the fill drifted
+        # too far — close immediately to cap risk at planned levels.
+        actual_R = abs(fill_price - sig["stop_loss"])
+        if sig["risk_points"] > 0 and actual_R > 1.5 * sig["risk_points"]:
+            logger.critical(
+                f"{symbol}: POST-FILL RISK BREACH — actual_R={actual_R:.2f} pts "
+                f"({actual_R / sig['risk_points']:.1f}× designed R={sig['risk_points']:.2f}). "
+                f"Fill={fill_price}, SL={sig['stop_loss']}. CLOSING immediately.")
+            self.telegram.critical_alert(
+                "POST-FILL RISK BREACH",
+                f"{symbol}: Fill drifted too far from signal.\n"
+                f"Designed R: {sig['risk_points']:.2f} pts\n"
+                f"Actual R: {actual_R:.2f} pts ({actual_R / sig['risk_points']:.1f}×)\n"
+                f"Closing position to cap risk.")
+            # Close the just-opened position
+            closed_ok = self.mt5.close_position(ticket)
+            self.trade_taken_today[symbol] = True
+            self.state.daily_trades += 1
+            if closed_ok:
+                pnl = self._get_closed_trade_pnl(ticket)
+                self.state.daily_pnl += pnl
+            else:
+                # Close failed — still track position so SL management works,
+                # but the oversized SL remains. Log critical for manual review.
+                logger.critical(f"{symbol}: POST-FILL close FAILED — position {ticket} "
+                                f"remains open with oversized SL!")
+                self.tracked_positions[ticket] = {
+                    "symbol": symbol,
+                    "direction": sig["direction"],
+                    "entry": fill_price,
+                    "sl_init": sig["stop_loss"],
+                    "tp": sig["tp"],
+                    "R": sig["risk_points"],
+                    "position_id": position_id,
+                    "hit_be": False,
+                    "max_favorable": 0.0,
+                    "max_adverse": 0.0,
+                    "volume": lots,
+                    "entry_time": str(datetime.now()),
+                    "journal_trade_id": None,
+                    "slippage_pts": slippage,
+                    "spread_entry": spread_pts_entry,
+                    "exec_latency_ms": exec_latency_ms,
+                }
+            self.edge_guard.record_missed_trade(
+                symbol, f"post_fill_risk_breach_{actual_R:.0f}pts",
+                sig.get('entry_price', 0))
+            self._save_state()
+            return
 
         # F2 FIX: Track position and mark trade taken BEFORE SL verification.
         # This prevents re-entry loops if SL verification fails and emergency-closes,
@@ -1495,6 +1580,7 @@ class LiveTrader:
             "sl_init": sig["stop_loss"],
             "tp": sig["tp"],
             "R": sig["risk_points"],
+            "position_id": position_id,
             "hit_be": False,
             "max_favorable": 0.0,
             "max_adverse": 0.0,
@@ -1598,7 +1684,9 @@ class LiveTrader:
                     continue
                 closed_tickets.append(ticket)
                 # Query deal history for actual PnL, exit price, and reason
-                details = self._get_closed_trade_details(ticket)
+                # Use position_id if available (may differ from order ticket on some brokers)
+                pos_id = info.get("position_id", ticket)
+                details = self._get_closed_trade_details(pos_id, expected_symbol=symbol)
                 pnl = details['pnl']
                 exit_price = details['exit_price']
                 exit_reason = details['exit_reason']
@@ -1861,7 +1949,8 @@ class LiveTrader:
         If successful, updates the trade journal and daily P&L with the real values."""
         def _requery():
             time.sleep(10)  # give MT5 time to register the deal
-            details = self._get_closed_trade_details(ticket)
+            pos_id = info.get("position_id", ticket)
+            details = self._get_closed_trade_details(pos_id, expected_symbol=symbol)
             pnl = details['pnl']
             exit_price = details['exit_price']
             exit_reason = details['exit_reason']
@@ -1869,7 +1958,7 @@ class LiveTrader:
             if pnl == 0.0 and exit_price == 0:
                 # Still nothing — try one more time after 30s
                 time.sleep(30)
-                details = self._get_closed_trade_details(ticket)
+                details = self._get_closed_trade_details(pos_id, expected_symbol=symbol)
                 pnl = details['pnl']
                 exit_price = details['exit_price']
                 exit_reason = details['exit_reason']
@@ -1928,7 +2017,7 @@ class LiveTrader:
         immediately after close (especially for IOC/emergency closes)."""
         return self._get_closed_trade_details(ticket).get('pnl', 0.0)
 
-    def _get_closed_trade_details(self, ticket: int) -> dict:
+    def _get_closed_trade_details(self, ticket: int, expected_symbol: str = None) -> dict:
         """Query MT5 deal history for full exit details: PnL, exit_price, exit_reason.
         Retries up to 6 times with 1.0s delay (total ~6s wait) since deals
         may not appear immediately after close on some brokers.
@@ -1941,19 +2030,40 @@ class LiveTrader:
             for attempt in range(6):
                 deals = mt5.history_deals_get(start, now, position=ticket)
                 if deals:
+                    # Sanity check: verify deals belong to the expected symbol
+                    if expected_symbol and hasattr(deals[0], 'symbol'):
+                        deal_symbol = deals[0].symbol
+                        if deal_symbol != expected_symbol:
+                            logger.warning(
+                                f"Deal symbol mismatch for position {ticket}: "
+                                f"expected {expected_symbol}, got {deal_symbol}. "
+                                f"Deals may belong to a different position.")
+                            # Filter deals to only include the expected symbol
+                            filtered = [d for d in deals if d.symbol == expected_symbol]
+                            if filtered:
+                                deals = filtered
+                                logger.info(f"Filtered to {len(deals)} deals for {expected_symbol}")
+                            # If no deals match, still use all deals but log warning
+
                     result['pnl'] = sum(d.profit + d.commission + d.swap for d in deals)
                     # Find the closing deal (DEAL_ENTRY_OUT = 1)
                     for d in deals:
                         if d.entry == 1:  # DEAL_ENTRY_OUT
                             result['exit_price'] = d.price
                             # Determine exit reason from deal reason
-                            # DEAL_REASON_SL=2, DEAL_REASON_TP=3, DEAL_REASON_CLIENT=0
-                            if d.reason == 2:
+                            # MT5 constants: DEAL_REASON_CLIENT=0, DEAL_REASON_MOBILE=1,
+                            # DEAL_REASON_WEB=2, DEAL_REASON_EXPERT=3,
+                            # DEAL_REASON_SL=4, DEAL_REASON_TP=5, DEAL_REASON_SO=6
+                            if d.reason == 4:  # DEAL_REASON_SL
                                 result['exit_reason'] = 'SL_HIT'
-                            elif d.reason == 3:
+                            elif d.reason == 5:  # DEAL_REASON_TP
                                 result['exit_reason'] = 'TP'
-                            elif d.reason == 0:
+                            elif d.reason in (0, 1, 2):  # CLIENT, MOBILE, WEB
                                 result['exit_reason'] = 'MANUAL'
+                            elif d.reason == 3:  # DEAL_REASON_EXPERT (EA/bot)
+                                result['exit_reason'] = 'EA_CLOSE'
+                            elif d.reason == 6:  # DEAL_REASON_SO (stop-out)
+                                result['exit_reason'] = 'STOP_OUT'
                             else:
                                 result['exit_reason'] = f'BROKER(r={d.reason})'
                             break
@@ -2078,11 +2188,12 @@ class LiveTrader:
                 time.sleep(1)
             # Record PnL for journal + edge guard
             try:
-                details = self._get_closed_trade_details(ticket)
-                pnl = details['pnl']
-                self.state.daily_pnl += pnl
                 info = self.tracked_positions.get(ticket, {})
                 symbol = info.get("symbol", p.get("symbol", ""))
+                pos_id = info.get("position_id", ticket)
+                details = self._get_closed_trade_details(pos_id, expected_symbol=symbol)
+                pnl = details['pnl']
+                self.state.daily_pnl += pnl
                 trade_id = info.get("journal_trade_id")
                 if trade_id:
                     pos_R = info.get('R', 0)
