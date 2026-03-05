@@ -22,6 +22,7 @@ warnings.filterwarnings("ignore")
 # ============================================================
 STARTING_BALANCE = 6000.0
 MC_ITERATIONS = 10000
+EXCLUDE_SYMBOLS = ['SWI20']  # Removed from live
 FN_PHASE1_TARGET = 0.08   # 8%
 FN_PHASE2_TARGET = 0.05   # 5%
 FN_DAILY_DD_LIMIT = 0.05  # 5%
@@ -33,9 +34,12 @@ DD_THRESHOLDS = {1: 0.03, 2: 0.05}  # tier transitions
 # LOAD TRADE DATA
 # ============================================================
 def load_trades():
-    trades_path = Path(__file__).parent / "reports" / "live_simulation" / "portfolio_trades.csv"
+    # Use latest 3yr backtest with live filters (spread, stale, drift)
+    trades_path = Path(__file__).parent / "reports" / "3year_backtest" / "all_trades.csv"
     df = pd.read_csv(trades_path)
     df["date"] = pd.to_datetime(df["date"])
+    # Exclude indices removed from live
+    df = df[~df["symbol"].isin(EXCLUDE_SYMBOLS)].reset_index(drop=True)
     return df
 
 # ============================================================

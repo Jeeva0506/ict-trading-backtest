@@ -109,7 +109,8 @@ def run_portfolio(all_signals):
     all_trades = []
     skipped_reasons = {"max_positions": 0, "daily_loss_limit": 0, "adaptive_stop": 0,
                        "max_daily_trades": 0, "max_dd_breach": 0,
-                       "spread_guard": 0, "price_drift": 0, "stale_signal": 0}
+                       "spread_guard": 0, "price_drift": 0, "stale_signal": 0,
+                       "min_R": 0}
     account_terminated = False
 
     current_day = None
@@ -153,6 +154,14 @@ def run_portfolio(all_signals):
             skipped_reasons["max_positions"] += 1
             continue
 
+        # ── LIVE FILTER: Minimum R guard (5 pts) ─────────────────────
+        # Rejects signals where risk (R) is too small. Tiny R means
+        # spread + slippage eats most of the edge. Live: MIN_R_POINTS=5.0
+        MIN_R_POINTS = 5.0
+        if risk_points < MIN_R_POINTS:
+            skipped_reasons["min_R"] += 1
+            continue
+
         # ── LIVE FILTER: Spread-to-R guard (30%) ──────────────────────
         # Rejects trades where spread eats too much of the risk (R).
         # SWI20 spread=3.0 pts on R~6.9 → 43% → BLOCKED
@@ -171,13 +180,13 @@ def run_portfolio(all_signals):
                 skipped_reasons["stale_signal"] += 1
                 continue
 
-        # ── LIVE FILTER: Price drift guard (relaxed 1.0R) ─────────────
+        # ── LIVE FILTER: Price drift guard (0.5R — matches live) ──────
         # Rejects if actual entry (next-bar open) drifted too far from
-        # signal price (breakout/retest candle close). Live uses 0.5R.
+        # signal price (breakout/retest candle close). Matches live 0.5R.
         signal_price = getattr(s, 'signal_price', None)
         if signal_price is not None and risk_points > 0:
             drift = abs(float(s.entry_price) - float(signal_price))
-            if drift > 1.0 * risk_points:
+            if drift > 0.5 * risk_points:
                 skipped_reasons["price_drift"] += 1
                 continue
 

@@ -47,7 +47,7 @@ PHASE2_TARGET_PCT = 5.0   # Phase 2 profit target
 MAX_DAILY_TRADES = 2      # max trades per day (aligned with live)
 MAX_CHALLENGE_DAYS = 60   # max calendar days for entire challenge (P1+P2)
 
-ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500", "SWI20", "US2000"]
+ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500", "US2000"]  # SWI20 removed (spread too wide)
 
 # Clean M1-only data files (no H1 contamination)
 DATA_FILES_M1 = {

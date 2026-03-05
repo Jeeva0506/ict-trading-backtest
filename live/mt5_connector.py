@@ -1713,6 +1713,27 @@ class LiveTrader:
                 exit_price = details['exit_price']
                 exit_reason = details['exit_reason']
 
+                # ── Symbol mismatch fallback: use MT5 account balance delta ──
+                if details.get('symbol_mismatch'):
+                    try:
+                        acct = mt5.account_info()
+                        if acct:
+                            new_balance = acct.balance
+                            pnl = round(new_balance - self.state.current_balance, 2)
+                            logger.info(f"Symbol mismatch fallback: balance ${self.state.current_balance:.2f} -> "
+                                        f"${new_balance:.2f}, PnL=${pnl:.2f}")
+                        # Infer exit details from tracked position SL/TP
+                        sl = info.get('sl', 0)
+                        tp = info.get('tp', 0)
+                        if pnl < 0:
+                            exit_price = sl
+                            exit_reason = 'SL_HIT'
+                        else:
+                            exit_price = tp
+                            exit_reason = 'TP'
+                    except Exception as e:
+                        logger.error(f"Balance fallback failed for {ticket}: {e}")
+
                 # Deferred re-query: if deal history failed, schedule a
                 # background retry after 10s to update journal with real P&L
                 if pnl == 0.0 and exit_price == 0:
@@ -2065,7 +2086,12 @@ class LiveTrader:
                             if filtered:
                                 deals = filtered
                                 logger.info(f"Filtered to {len(deals)} deals for {expected_symbol}")
-                            # If no deals match, still use all deals but log warning
+                            else:
+                                # NO deals match expected symbol — return mismatch flag
+                                # so caller can use MT5 balance fallback instead of wrong data
+                                logger.warning(f"No deals found for {expected_symbol} in position {ticket} — returning symbol_mismatch")
+                                result['symbol_mismatch'] = True
+                                return result
 
                     result['pnl'] = sum(d.profit + d.commission + d.swap for d in deals)
                     # Find the closing deal (DEAL_ENTRY_OUT = 1)
