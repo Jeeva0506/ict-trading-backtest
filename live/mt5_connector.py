@@ -94,6 +94,25 @@ BOT_MAGIC = 20260000 + (MT5_LOGIN % 10000)
 
 
 # ============================================================================
+#  Helpers
+# ============================================================================
+def _get_fn_day() -> str:
+    """Return the FundedNext trading day string (yyyy-mm-dd).
+    FN day flips at 5 PM US/Eastern.  Before 5 PM it's still 'yesterday'.
+    This MUST be used everywhere we compare/set last_reset_date so that
+    initialize(), _load_state(), and _check_daily_reset() all agree."""
+    import pytz
+    try:
+        est = pytz.timezone('US/Eastern')
+        est_now = datetime.now(est)
+        if est_now.hour < 17:
+            return (est_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        return est_now.strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+# ============================================================================
 #  TradingState
 # ============================================================================
 @dataclass
@@ -681,7 +700,7 @@ class LiveTrader:
             with open(self.STATE_FILE) as f:
                 data = json.load(f)
 
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = _get_fn_day()
             saved_date = data.get("last_reset_date", "")
 
             if saved_date == today:
@@ -985,7 +1004,7 @@ class LiveTrader:
         self.dd_protection = DrawdownProtection(ACCOUNT_SIZE)
         self.state.current_balance = balance
         self.state.daily_start_balance = balance
-        self.state.last_reset_date = datetime.now().strftime("%Y-%m-%d")
+        self.state.last_reset_date = _get_fn_day()
 
         logger.info(f"LiveTrader initialized - Account Size: ${balance:,.2f}")
         risk_pct = self.dd_protection.get_adaptive_risk(balance)
@@ -1034,18 +1053,7 @@ class LiveTrader:
     # ────────────────────────────────────────────────────────────────────
     def _check_daily_reset(self):
         # C5 FIX: FundedNext resets daily DD at 5:00 PM EST = 00:00 EET (MT5 server time)
-        # Use MT5 server time for day boundary to match FundedNext's reset
-        import pytz
-        try:
-            est = pytz.timezone('US/Eastern')
-            fn_day = datetime.now(est).strftime("%Y-%m-%d")
-            # FundedNext day flips at 5 PM EST — if before 5 PM, it's still "yesterday" for FN
-            est_now = datetime.now(est)
-            if est_now.hour < 17:
-                fn_day = (est_now - timedelta(days=1)).strftime("%Y-%m-%d")
-        except Exception:
-            fn_day = datetime.now().strftime("%Y-%m-%d")
-        today = fn_day
+        today = _get_fn_day()
         if self.state.last_reset_date != today:
             logger.info(f"New day: {today} - resetting daily counters "
                         f"(prev PnL: ${self.state.daily_pnl:.2f})")
@@ -1721,6 +1729,12 @@ class LiveTrader:
             self._save_state()
             return
 
+        # Compute ACTUAL risk based on lots × live_R × point_value
+        # (sizing["risk_amount"] is the intended budget, but margin caps may reduce lots)
+        # MUST be computed BEFORE journal/telegram use it.
+        _pt_val = sizing.get("point_value", 10.0)
+        actual_risk_amount = round(lots * live_risk_points * _pt_val, 2)
+
         # Journal + notification
         trade_id = self.journal.add_trade({
             "symbol": symbol,
@@ -1749,11 +1763,6 @@ class LiveTrader:
         # Link journal trade_id to tracked position for close_trade
         if ticket in self.tracked_positions:
             self.tracked_positions[ticket]["journal_trade_id"] = trade_id
-
-        # Compute ACTUAL risk based on lots × live_R × point_value
-        # (sizing["risk_amount"] is the intended budget, but margin caps may reduce lots)
-        _pt_val = sizing.get("point_value", 10.0)
-        actual_risk_amount = round(lots * live_risk_points * _pt_val, 2)
 
         self.telegram.trade_entry(
             symbol=symbol,
