@@ -29,9 +29,18 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 from pathlib import Path
 
-# Load .env for config values
+# Load .env for config values (respect ACCOUNT_PROFILE for multi-account)
+import os as _os
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / '.env')
+_sl_profile = _os.environ.get('ACCOUNT_PROFILE', '').strip()
+if _sl_profile:
+    _sl_env = Path(__file__).parent.parent / f'.env.{_sl_profile}'
+    if _sl_env.exists():
+        load_dotenv(_sl_env, override=True)
+    else:
+        load_dotenv(Path(__file__).parent.parent / '.env')
+else:
+    load_dotenv(Path(__file__).parent.parent / '.env')
 
 # ============================================================================
 # CONFIGURATION CONSTANTS

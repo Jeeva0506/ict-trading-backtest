@@ -1642,12 +1642,13 @@ class LiveTrader:
                 f"Sized R: {live_risk_points:.2f} pts\n"
                 f"Actual R: {actual_R:.2f} pts ({actual_R / live_risk_points:.1f}×)\n"
                 f"Closing position to cap risk.")
-            # Close the just-opened position
-            closed_ok = self.mt5.close_position(ticket)
+            # Close the just-opened position (use position_id, not order ticket)
+            closed_ok = self.mt5.close_position(position_id)
             self.trade_taken_today[symbol] = True
             self.state.daily_trades += 1
             if closed_ok:
-                pnl = self._get_closed_trade_pnl(ticket)
+                details = self._get_closed_trade_details(position_id, expected_symbol=symbol)
+                pnl = details['pnl']
                 self.state.daily_pnl += pnl
             else:
                 # Close failed — still track position so SL management works,
@@ -1685,16 +1686,8 @@ class LiveTrader:
         self.trade_taken_today[symbol] = True
         self.state.daily_trades += 1
         # Reset no-trade streak on successful fill
-        import pytz as _pytz
-        try:
-            _est_now = datetime.now(_pytz.timezone('US/Eastern'))
-            _fn_day = _est_now.strftime("%Y-%m-%d")
-            if _est_now.hour < 17:
-                _fn_day = (_est_now - timedelta(days=1)).strftime("%Y-%m-%d")
-            self._no_trade_streak = 0
-            self._last_trade_date = _fn_day
-        except Exception:
-            self._no_trade_streak = 0
+        self._no_trade_streak = 0
+        self._last_trade_date = _get_fn_day()
         self.tracked_positions[ticket] = {
             "symbol": symbol,
             "direction": sig["direction"],
@@ -1833,7 +1826,7 @@ class LiveTrader:
                             logger.info(f"Symbol mismatch fallback: balance ${self.state.current_balance:.2f} -> "
                                         f"${new_balance:.2f}, PnL=${pnl:.2f}")
                         # Infer exit details from tracked position SL/TP
-                        sl = info.get('sl', 0)
+                        sl = info.get('sl_init', 0)
                         tp = info.get('tp', 0)
                         if pnl < 0:
                             exit_price = sl
@@ -2020,9 +2013,12 @@ class LiveTrader:
                 # F1+F3 FIX: Single force-close path, use deal history for accurate PnL
                 if force_close_triggered:
                     logger.info(f"Force closing {ticket} ({symbol}) - session ending")
-                    ok = self.mt5.close_position(ticket)
+                    _fc_pos_id = info.get("position_id", ticket)
+                    ok = self.mt5.close_position(_fc_pos_id)
                     if ok:
-                        pnl = self._get_closed_trade_pnl(ticket)
+                        _fc_details = self._get_closed_trade_details(_fc_pos_id, expected_symbol=symbol)
+                        pnl = _fc_details['pnl']
+                        _fc_exit_price = _fc_details['exit_price'] or current_price
                         self.state.daily_pnl += pnl
                         
                         # Journal close with MFE/MAE
@@ -2037,7 +2033,7 @@ class LiveTrader:
                             _sc_risk = self.dd_protection.get_adaptive_risk(_sc_bal)
                             _sc_tier = 'TIER 3' if _sc_risk <= 0.5 else ('TIER 2' if _sc_risk <= 0.75 else 'TIER 1')
                             self.journal.close_trade(trade_id, {
-                                "exit_price": current_price,
+                                "exit_price": _fc_exit_price,
                                 "exit_reason": "SESSION_CLOSE",
                                 "pnl": pnl,
                                 "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,

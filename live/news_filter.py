@@ -36,6 +36,7 @@ class EconomicCalendar:
         'US30': ['USD'],
         'US2000': ['USD'],
         'GER30': ['EUR', 'USD'],  # Also affected by USD news
+        'FRA40': ['EUR', 'USD'],  # CAC40 — affected by EUR and USD news
         'SWI20': ['CHF', 'EUR'],  # Swiss index, also affected by EUR news
     }
 
