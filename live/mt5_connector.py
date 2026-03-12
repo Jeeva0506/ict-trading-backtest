@@ -441,14 +441,33 @@ def is_market_open(symbol: str) -> bool:
         local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
         local_now = utc_now.astimezone(local_tz).replace(tzinfo=None)
     except Exception:
-        # Fallback to server time if timezone fails
+        # Fallback: use config mt5_* hours as-is (already in server time approx)
         try:
-            local_tz_fb = pytz.timezone("Asia/Kolkata")
-            mt5_tz = pytz.timezone("Europe/Helsinki")
-            local_now = datetime.now(local_tz_fb).astimezone(mt5_tz).replace(tzinfo=None)
-            # Use MT5 hours as fallback
-            if local_now.weekday() >= 5:
+            local_now_fallback = datetime.now()
+            if local_now_fallback.weekday() >= 5:
                 return False
+            # Approximate: use IST → broker offset (~+2 or +3 from UTC)
+            import time as _fallback_time
+            for _fb_sym in ['EURUSD', 'SPX500', 'GER30']:
+                _fb_tick = mt5.symbol_info_tick(_fb_sym)
+                if _fb_tick and _fb_tick.time > 0:
+                    _fb_offset = round((_fb_tick.time - int(_fallback_time.time())) / 3600)
+                    if -12 <= _fb_offset <= 14:
+                        from datetime import timezone as _fbtz, timedelta as _fbtd
+                        _fb_broker_tz = _fbtz(_fbtd(hours=_fb_offset))
+                        _fb_utc = datetime.now(pytz.UTC)
+                        local_now = _fb_utc.astimezone(_fb_broker_tz).replace(tzinfo=None)
+                        break
+            else:
+                # Last resort: use mt5 hours with IST-based approximation
+                local_tz_fb = pytz.timezone("Asia/Kolkata")
+                ist_now = datetime.now(local_tz_fb)
+                # Broker is roughly IST - 2:30 or IST - 3:30
+                ny = pytz.timezone('America/New_York')
+                _fb_offset2 = 3 if bool(datetime.now(ny).dst()) else 2
+                _fb_broker_tz2 = _fbtz(_fbtd(hours=_fb_offset2))
+                local_now = ist_now.astimezone(_fb_broker_tz2).replace(tzinfo=None)
+
             cur = local_now.hour * 60 + local_now.minute
             o = config["mt5_open_hour"] * 60 + config["mt5_open_minute"]
             c = config["mt5_close_hour"] * 60 + config["mt5_close_minute"]
@@ -1129,6 +1148,33 @@ class LiveTrader:
                                 f"Position closed.")
 
     # ────────────────────────────────────────────────────────────────────
+    #  Broker UTC offset detection (DST-safe)
+    # ────────────────────────────────────────────────────────────────────
+    def _get_broker_utc_offset(self) -> int:
+        """Auto-detect broker server's UTC offset from tick timestamps.
+
+        MT5's tick.time returns server time encoded as a pseudo-UTC epoch:
+        the epoch value represents the *server-local* wall-clock, NOT real UTC.
+        Compare with actual UTC epoch to derive the offset.
+
+        Returns offset in hours (e.g. 3 for UTC+3 / EEST).
+        """
+        import time as _time
+
+        for sym in ['EURUSD', 'SPX500', 'GER30', 'XAUUSD']:
+            tick = mt5.symbol_info_tick(sym)
+            if tick and tick.time > 0:
+                real_utc = int(_time.time())
+                offset_hours = round((tick.time - real_utc) / 3600)
+                if -12 <= offset_hours <= 14:
+                    return offset_hours
+
+        # Fallback: FundedNext follows US DST (UTC+3 when US DST active, else UTC+2)
+        import pytz
+        ny = pytz.timezone('America/New_York')
+        return 3 if bool(datetime.now(ny).dst()) else 2
+
+    # ────────────────────────────────────────────────────────────────────
     #  HTF EMA computation (live: from MT5 H1 bars)
     # ────────────────────────────────────────────────────────────────────
     def _get_htf_trend(self, symbol: str) -> Optional[str]:
@@ -1163,14 +1209,20 @@ class LiveTrader:
             return None
 
         # Get MT5 server time and compute DST-safe session boundaries
+        # FIX: Auto-detect broker UTC offset from tick timestamps instead
+        # of hardcoding Europe/Helsinki (which has a different DST schedule
+        # than the FundedNext broker, causing a 1-hour data shift from
+        # US DST start (March 9) until EU DST start (March 29)).
         import pytz
+        from datetime import timezone as _tz, timedelta as _td
         try:
             utc_now = datetime.now(pytz.UTC)
-            mt5_tz = pytz.timezone("Europe/Helsinki")
-            mt5_now = utc_now.astimezone(mt5_tz).replace(tzinfo=None)
+            broker_offset = self._get_broker_utc_offset()
+            broker_tz = _tz(_td(hours=broker_offset))
+            mt5_now = utc_now.astimezone(broker_tz).replace(tzinfo=None)
 
             # DST-safe: compute session times from market's LOCAL timezone,
-            # then convert to MT5 server time for data slicing
+            # then convert to broker server time for data slicing
             local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
             local_now = utc_now.astimezone(local_tz)
             local_today = local_now.date()
@@ -1183,13 +1235,17 @@ class LiveTrader:
                 local_today.year, local_today.month, local_today.day,
                 config["market_close_hour"], config["market_close_minute"]))
 
-            # Convert to MT5 server time (what the M1 data timestamps use)
-            srv_open = local_open.astimezone(mt5_tz).replace(tzinfo=None)
-            srv_close = local_close.astimezone(mt5_tz).replace(tzinfo=None)
+            # Convert to broker server time (what the M1 data timestamps use)
+            srv_open = local_open.astimezone(broker_tz).replace(tzinfo=None)
+            srv_close = local_close.astimezone(broker_tz).replace(tzinfo=None)
 
             session_start = pd.Timestamp(srv_open)
             session_end = pd.Timestamp(srv_close)
-        except Exception:
+            logger.debug(f"{symbol}: broker_offset=UTC+{broker_offset}, "
+                         f"session={session_start}-{session_end}")
+        except Exception as e:
+            logger.warning(f"{symbol}: DST-safe session calc failed ({e}), "
+                           f"using config mt5_open fallback")
             mt5_now = datetime.now()
             today = mt5_now.date()
             session_start = pd.Timestamp(
@@ -1397,25 +1453,11 @@ class LiveTrader:
         # C3 FIX: Sync adaptive risk to SL protection emergency threshold
         sl_update_risk(risk_pct / 100)
 
-        # Position sizing with live broker data
-        sizing = calculate_position_size_with_broker_data(
-            symbol, balance, risk_pct, sig["risk_points"],
-            free_margin=free_margin, max_margin_percent=90.0
-        )
-        lots = sizing["lots"]
-        if lots <= 0:
-            logger.warning(f"{symbol}: Position size = 0 lots, skipping")
-            self.edge_guard.record_missed_trade(symbol, "zero_lot_size", sig.get('entry_price', 0))
-            return
-
         order_type = "buy" if sig["direction"] == "bullish" else "sell"
         comment = f"ORB_{symbol}"
 
         # ── MINIMUM R GUARD ───────────────────────────────────────────
         # Reject signals where R is too small for live execution.
-        # Tiny R (e.g. 2.4 pts on US2000) means spread + slippage eat
-        # most of the risk budget, guaranteeing > 1R losses.
-        # SPX500/US2000 have smaller point values → 3 pt min; others 5 pt.
         MIN_R_BY_SYMBOL = {"SPX500": 3.0, "US2000": 3.0}
         MIN_R_POINTS = MIN_R_BY_SYMBOL.get(symbol, 5.0)
         if sig["risk_points"] < MIN_R_POINTS:
@@ -1439,7 +1481,9 @@ class LiveTrader:
         delay = random.uniform(1.0, 2.0)
         time.sleep(delay)
 
-        # Log expected price + spread for execution quality tracking
+        # ── LIVE PRICE for accurate lot sizing ────────────────────────
+        # Use current bid/ask (not stale signal entry) so lot size
+        # reflects the ACTUAL risk distance at moment of execution.
         bid, ask = self.mt5.get_current_price(symbol)
         expected_price = ask if order_type == "buy" else bid
         spread_pts_entry = 0
@@ -1449,6 +1493,33 @@ class LiveTrader:
                 spread_pts_entry = tick_info.spread
         except Exception:
             pass
+
+        # Compute live R (from expected fill to SL)
+        if expected_price and sig["stop_loss"]:
+            live_risk_points = abs(expected_price - sig["stop_loss"])
+        else:
+            live_risk_points = sig["risk_points"]
+        # Safety: if live R is unreasonably small, use signal R
+        if live_risk_points < 0.5:
+            live_risk_points = sig["risk_points"]
+        # Log if live R differs significantly from signal R
+        if sig["risk_points"] > 0:
+            r_drift_pct = (live_risk_points - sig["risk_points"]) / sig["risk_points"]
+            if abs(r_drift_pct) > 0.10:
+                logger.info(
+                    f"{symbol}: LOT SIZING R adjusted — signal_R={sig['risk_points']:.2f} → "
+                    f"live_R={live_risk_points:.2f} ({r_drift_pct:+.0%})")
+
+        # Position sizing with live broker data — use LIVE R for accurate risk
+        sizing = calculate_position_size_with_broker_data(
+            symbol, balance, risk_pct, live_risk_points,
+            free_margin=free_margin, max_margin_percent=90.0
+        )
+        lots = sizing["lots"]
+        if lots <= 0:
+            logger.warning(f"{symbol}: Position size = 0 lots, skipping")
+            self.edge_guard.record_missed_trade(symbol, "zero_lot_size", sig.get('entry_price', 0))
+            return
 
         # ── PRE-ORDER DRIFT — LOG ONLY (no rejection) ─────────────────
         # Backtest does not have a pre-order drift guard. Removing the
@@ -1466,7 +1537,7 @@ class LiveTrader:
         # Reject if spread > 30% of risk (R) — spread eats too much edge.
         # US2000 typical spread ~0.9 pts on R~7.7 = 12% → OK
         MAX_SPREAD_R_PCT = 0.30  # 30% of R
-        if sig["risk_points"] > 0:
+        if live_risk_points > 0:
             # Convert tick-based spread to point spread
             sym_info = mt5.symbol_info(symbol)
             if not sym_info or sym_info.point <= 0:
@@ -1476,11 +1547,11 @@ class LiveTrader:
                     sig.get('entry_price', 0))
                 return
             spread_points = spread_pts_entry * sym_info.point
-            spread_r_ratio = spread_points / sig["risk_points"]
+            spread_r_ratio = spread_points / live_risk_points
             if spread_r_ratio > MAX_SPREAD_R_PCT:
                 logger.warning(
                     f"{symbol}: SPREAD GUARD — spread={spread_points:.2f} pts "
-                    f"({spread_r_ratio:.0%} of R={sig['risk_points']:.2f}) > "
+                    f"({spread_r_ratio:.0%} of R={live_risk_points:.2f}) > "
                     f"{MAX_SPREAD_R_PCT:.0%} threshold. Trade REJECTED.")
                 self.edge_guard.record_missed_trade(
                     symbol, f"spread_guard_{spread_r_ratio:.0%}R",
@@ -1526,19 +1597,19 @@ class LiveTrader:
                         f"(expected {expected_price}, got {fill_price})")
 
         # ── POST-FILL RISK GUARD ──────────────────────────────────────
-        # If actual SL distance exceeds 1.5× designed R, the fill drifted
-        # too far — close immediately to cap risk at planned levels.
+        # If actual SL distance exceeds 1.5× the R we sized on (live_risk_points),
+        # the fill drifted too far — close immediately to cap risk.
         actual_R = abs(fill_price - sig["stop_loss"])
-        if sig["risk_points"] > 0 and actual_R > 1.5 * sig["risk_points"]:
+        if live_risk_points > 0 and actual_R > 1.5 * live_risk_points:
             logger.critical(
                 f"{symbol}: POST-FILL RISK BREACH — actual_R={actual_R:.2f} pts "
-                f"({actual_R / sig['risk_points']:.1f}× designed R={sig['risk_points']:.2f}). "
+                f"({actual_R / live_risk_points:.1f}× sized_R={live_risk_points:.2f}). "
                 f"Fill={fill_price}, SL={sig['stop_loss']}. CLOSING immediately.")
             self.telegram.critical_alert(
                 "POST-FILL RISK BREACH",
-                f"{symbol}: Fill drifted too far from signal.\n"
-                f"Designed R: {sig['risk_points']:.2f} pts\n"
-                f"Actual R: {actual_R:.2f} pts ({actual_R / sig['risk_points']:.1f}×)\n"
+                f"{symbol}: Fill drifted too far from sized R.\n"
+                f"Sized R: {live_risk_points:.2f} pts\n"
+                f"Actual R: {actual_R:.2f} pts ({actual_R / live_risk_points:.1f}×)\n"
                 f"Closing position to cap risk.")
             # Close the just-opened position
             closed_ok = self.mt5.close_position(ticket)
@@ -1558,7 +1629,7 @@ class LiveTrader:
                     "entry": fill_price,
                     "sl_init": sig["stop_loss"],
                     "tp": sig["tp"],
-                    "R": sig["risk_points"],
+                    "R": live_risk_points,
                     "position_id": position_id,
                     "hit_be": False,
                     "max_favorable": 0.0,
@@ -1599,7 +1670,7 @@ class LiveTrader:
             "entry": fill_price,
             "sl_init": sig["stop_loss"],
             "tp": sig["tp"],
-            "R": sig["risk_points"],
+            "R": live_risk_points,
             "position_id": position_id,
             "hit_be": False,
             "max_favorable": 0.0,
@@ -1639,7 +1710,8 @@ class LiveTrader:
             "tp2": sig["tp"],
             "tp3": sig["tp"],
             "risk_amount": sizing.get("risk_amount", 0),
-            "risk_points": sig["risk_points"],
+            "risk_points": live_risk_points,
+            "signal_risk_points": sig["risk_points"],
             "point_value": sizing.get("point_value", 1.0),
             "planned_rr": 2.5,
             "signal_time": sig.get("signal_time", ""),
@@ -1648,7 +1720,7 @@ class LiveTrader:
             "spread_entry": spread_pts_entry,
             "session": self._get_session_name(symbol),
             "weekday": datetime.now().strftime("%A"),
-            "notes": f"R={sig['risk_points']:.2f} slip={slippage:+.2f} spread={spread_pts_entry} lat={exec_latency_ms}ms",
+            "notes": f"sigR={sig['risk_points']:.2f} liveR={live_risk_points:.2f} slip={slippage:+.2f} spread={spread_pts_entry} lat={exec_latency_ms}ms",
         })
 
         # Link journal trade_id to tracked position for close_trade
@@ -1668,7 +1740,8 @@ class LiveTrader:
         )
 
         logger.info(f"TRADE: {order_type.upper()} {lots} {symbol} @ {fill_price} | "
-                     f"SL: {sig['stop_loss']} | TP: {sig['tp']} | R: {sig['risk_points']:.2f}")
+                     f"SL: {sig['stop_loss']} | TP: {sig['tp']} | "
+                     f"sigR: {sig['risk_points']:.2f} | liveR: {live_risk_points:.2f}")
 
         # Record trade in session recap
         self._session_recap.setdefault(symbol, {}).update({
@@ -1890,10 +1963,12 @@ class LiveTrader:
                     if force_min <= now_min < close_min:
                         force_close_triggered = True
                 except Exception as tz_err:
-                    # C7 FIX: Fallback uses MT5 server time (EET) with MT5-specific hours
+                    # C7 FIX: Fallback uses auto-detected broker offset
                     logger.warning(f"Timezone fallback for {symbol}: {tz_err}")
-                    mt5_tz = pytz.timezone("Europe/Helsinki")
-                    local_now = utc_now.astimezone(mt5_tz).replace(tzinfo=None)
+                    from datetime import timezone as _fctz, timedelta as _fctd
+                    _fc_offset = self._get_broker_utc_offset()
+                    _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
+                    local_now = utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
                     now_min = local_now.hour * 60 + local_now.minute
                     # C7 FIX: Use mt5_ hours (already in server time)
                     force_h = config["mt5_close_hour"]
