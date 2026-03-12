@@ -1,0 +1,198 @@
+==========================================================================================
+   FUNDEDNEXT STELLAR-2 — SALARY-FUNDED SCALING SIMULATION
+   Strategy: Pass 3 accounts → then buy $100K challenge/month from salary
+   Target: $500,000 Total Funded Capital
+   Generated: March 12, 2026
+==========================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1: SIMULATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PHASE 1 — ORGANIC (before confidence):
+    Start with $6K challenge ($59 fee)
+    Use payouts to buy more challenges
+    Until 3 accounts are FUNDED in live
+
+  PHASE 2 — SALARY-FUNDED (after confidence):
+    Buy ONE $100,000 challenge every month
+    Fee: $519/month from salary
+    All payouts go to wallet (pure profit)
+    Continue until pipeline ≥ $500,000
+
+  CHALLENGE: 1.5% risk (3-tier adaptive), 8.5%/5.5% targets
+  FUNDED:    0.5% risk (0.25% after 4% DD)
+  PAYOUTS:   Bi-weekly, ≥1% profit, 80/20 split
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2: SCALING JOURNEY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Total Challenges Purchased : 13
+    └ From initial           : 1
+    └ From payouts           : 7
+    └ From salary            : 5
+  Challenges Passed          : 13
+  Challenges Breached        : 0
+  Challenges In Progress     : 0
+  Pass Rate                  : 100%
+
+  ✅ CONFIDENCE GAINED        : 2015-12-31
+     (3 accounts funded → started buying $100K/month from salary)
+
+  INVESTMENT BREAKDOWN:
+    Initial fee               : $59
+    Salary spent on fees      : $2,595
+    Total personal investment : $2,654
+    Fees refunded (on pass)   : $3,187
+    Net fee cost              : $-533
+
+  ┌──────┬────────────┬──────────┬──────┬──────────┬─────────────────────────────┐
+  │  #   │    Date    │ Capital  │ Fee  │  Source  │ Status                      │
+  ├──────┼────────────┼──────────┼──────┼──────────┼─────────────────────────────┤
+  │    1 │ 2010-11-18 │ $ 6,000 │ $ 59 │ 🏁 initial │ FUNDED (2014-10-20)         │
+  │    2 │ 2014-10-28 │ $ 6,000 │ $ 59 │ 📈 payouts │ FUNDED (2015-06-18)         │
+  │    3 │ 2014-12-16 │ $ 6,000 │ $ 59 │ 📈 payouts │ FUNDED (2015-12-29)         │
+  │    4 │ 2015-05-14 │ $15,000 │ $119 │ 📈 payouts │ FUNDED (2016-02-08)         │
+  │    5 │ 2015-06-25 │ $ 6,000 │ $ 59 │ 📈 payouts │ FUNDED (2016-05-12)         │
+  │    6 │ 2015-09-14 │ $ 6,000 │ $ 59 │ 📈 payouts │ FUNDED (2016-02-08)         │
+  │    7 │ 2015-10-14 │ $ 6,000 │ $ 59 │ 📈 payouts │ FUNDED (2016-02-17)         │
+  │    8 │ 2015-11-26 │ $15,000 │ $119 │ 📈 payouts │ FUNDED (2016-04-06)         │
+  │    9 │ 2016-02-02 │ $100,000 │ $519 │ 💼 salary │ FUNDED (2016-04-04)         │
+  │   10 │ 2016-03-10 │ $100,000 │ $519 │ 💼 salary │ FUNDED (2018-05-10)         │
+  │   11 │ 2016-04-11 │ $100,000 │ $519 │ 💼 salary │ FUNDED (2018-07-30)         │
+  │   12 │ 2016-05-12 │ $100,000 │ $519 │ 💼 salary │ FUNDED (2018-06-25)         │
+  │   13 │ 2016-06-17 │ $100,000 │ $519 │ 💼 salary │ FUNDED (2018-07-30)         │
+  └──────┴────────────┴──────────┴──────┴──────────┴─────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3: FUNDED ACCOUNTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Active Funded Accounts     : 13
+  Total Funded Capital       : $566,000
+
+  🎯 TARGET $500,000 REACHED!
+
+  ┌──────┬──────────┬──────────┬───────────┬────────┬────────┬───────────┐
+  │  ID  │ Capital  │ Source   │  Funded   │ Trades │  WR    │ Tot Paid  │
+  ├──────┼──────────┼──────────┼───────────┼────────┼────────┼───────────┤
+  │    9 │ $100,000 │ salary   │ 2016-04-04 │    914 │ 56.8%  │ $ 86,345 │
+  │   10 │ $100,000 │ salary   │ 2018-05-10 │    794 │ 57.7%  │ $ 79,610 │
+  │   11 │ $100,000 │ salary   │ 2018-07-30 │    777 │ 57.8%  │ $ 75,485 │
+  │   12 │ $100,000 │ salary   │ 2018-06-25 │    784 │ 57.8%  │ $ 77,050 │
+  │   13 │ $100,000 │ salary   │ 2018-07-30 │    777 │ 57.8%  │ $ 75,485 │
+  │    4 │ $15,000 │ payouts  │ 2016-02-08 │    921 │ 56.8%  │ $ 13,225 │
+  │    8 │ $15,000 │ payouts  │ 2016-04-06 │    912 │ 56.7%  │ $ 12,765 │
+  │    1 │ $ 6,000 │ initial  │ 2014-10-20 │   1035 │ 56.5%  │ $  5,853 │
+  │    2 │ $ 6,000 │ payouts  │ 2015-06-18 │    977 │ 56.4%  │ $  5,610 │
+  │    3 │ $ 6,000 │ payouts  │ 2015-12-29 │    942 │ 56.8%  │ $  5,463 │
+  │    5 │ $ 6,000 │ payouts  │ 2016-05-12 │    903 │ 56.7%  │ $  5,009 │
+  │    6 │ $ 6,000 │ payouts  │ 2016-02-08 │    921 │ 56.8%  │ $  5,290 │
+  │    7 │ $ 6,000 │ payouts  │ 2016-02-17 │    919 │ 56.7%  │ $  5,175 │
+  └──────┴──────────┴──────────┴───────────┴────────┴────────┴───────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4: PAYOUT SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Total Payouts              : 630
+  Total Withdrawn (80%)      : $452,366.91
+  Average Payout             : $718.04
+
+  ┌──────┬────────┬───────────────┬───────────────┐
+  │ Year │ Count  │   Total Paid  │   Per Month   │
+  ├──────┼────────┼───────────────┼───────────────┤
+  │ 2014 │      1 │ $      80.86 │ $       6.74 │
+  │ 2015 │      4 │ $     352.28 │ $      29.36 │
+  │ 2016 │     24 │ $   5,708.50 │ $     475.71 │
+  │ 2018 │     94 │ $  86,936.39 │ $   7,244.70 │
+  │ 2019 │     39 │ $  22,995.37 │ $   1,916.28 │
+  │ 2020 │     91 │ $  46,385.84 │ $   3,865.49 │
+  │ 2021 │     52 │ $  23,699.42 │ $   1,974.95 │
+  │ 2022 │     91 │ $  74,168.74 │ $   6,180.73 │
+  │ 2023 │     39 │ $  32,152.00 │ $   2,679.33 │
+  │ 2024 │     91 │ $  55,367.47 │ $   4,613.96 │
+  │ 2025 │    104 │ $ 104,520.05 │ $   8,710.00 │
+  └──────┴────────┴───────────────┴───────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5: NET FINANCIAL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  MONEY IN (personal):                             
+    Initial challenge fee     : $        59
+    Salary → challenge fees   : $     2,595
+    ─────────────────────────────────────────────── 
+    Total Personal Invested   : $     2,654
+
+  MONEY OUT (from trading):                        
+    Total Payouts (80%)       : $452,366.91
+    Fee Refunds (on pass)     : $     3,187
+    ─────────────────────────────────────────────── 
+    Total Money Back          : $455,553.91
+
+    ═══════════════════════════════════════════════ 
+    NET PROFIT                : $452,899.91
+    ROI                       : 17,065%
+
+    Avg Annual Payouts        : $ 29,647.77/year
+    Avg Monthly Payouts       : $  2,470.65/month
+
+    Salary investment period  : 5 months ($519/mo)
+    Payback period           : 1.1 months
+
+    Simulation Period         : 2010-11-18 → 2026-02-20 (15.3 years)
+    Wallet Balance           : $455,020.91
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6: KEY MILESTONES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  2010-11-18  🏁 Buy $6,000 challenge (initial)
+  2014-10-20  ✅ Acct #1 $6,000 FUNDED
+  2014-10-28  📈 Buy $6,000 challenge (payouts)
+  2014-12-16  📈 Buy $6,000 challenge (payouts)
+  2015-05-14  📈 Buy $15,000 challenge (payouts)
+  2015-06-18  ✅ Acct #2 $6,000 FUNDED
+  2015-06-25  📈 Buy $6,000 challenge (payouts)
+  2015-09-14  📈 Buy $6,000 challenge (payouts)
+  2015-10-14  📈 Buy $6,000 challenge (payouts)
+  2015-11-26  📈 Buy $15,000 challenge (payouts)
+  2015-12-29  ✅ Acct #3 $6,000 FUNDED
+  2015-12-31  🔥 CONFIDENCE! 3 accounts funded → salary buying starts
+  2016-02-02  💼 Buy $100,000 challenge (salary)
+  2016-02-08  ✅ Acct #4 $15,000 FUNDED
+  2016-02-08  ✅ Acct #6 $6,000 FUNDED
+  2016-02-17  ✅ Acct #7 $6,000 FUNDED
+  2016-03-10  💼 Buy $100,000 challenge (salary)
+  2016-04-04  ✅ Acct #9 $100,000 FUNDED
+  2016-04-06  ✅ Acct #8 $15,000 FUNDED
+  2016-04-11  💼 Buy $100,000 challenge (salary)
+  2016-05-12  💼 Buy $100,000 challenge (salary)
+  2016-05-12  ✅ Acct #5 $6,000 FUNDED
+  2016-06-17  💼 Buy $100,000 challenge (salary)
+  2018-05-10  ✅ Acct #10 $100,000 FUNDED
+  2018-06-25  ✅ Acct #12 $100,000 FUNDED
+  2018-07-30  ✅ Acct #11 $100,000 FUNDED
+  2018-07-30  ✅ Acct #13 $100,000 FUNDED
+  2026-02-20  🎯 $500,000 FUNDED CAPITAL REACHED!
+
+  FUNDED CAPITAL PROGRESSION:
+    2014-10-20  +$6,000  →  Total: $6,000  (initial)
+    2015-06-18  +$6,000  →  Total: $12,000  (payouts)
+    2015-12-29  +$6,000  →  Total: $18,000  (payouts)
+    2016-02-08  +$15,000  →  Total: $33,000  (payouts)
+    2016-02-08  +$6,000  →  Total: $39,000  (payouts)
+    2016-02-17  +$6,000  →  Total: $45,000  (payouts)
+    2016-04-04  +$100,000  →  Total: $145,000  (salary)
+    2016-04-06  +$15,000  →  Total: $160,000  (payouts)
+    2016-05-12  +$6,000  →  Total: $166,000  (payouts)
+    2018-05-10  +$100,000  →  Total: $266,000  (salary)
+    2018-06-25  +$100,000  →  Total: $366,000  (salary)
+    2018-07-30  +$100,000  →  Total: $466,000  (salary)
+    2018-07-30  +$100,000  →  Total: $566,000  (salary)
+
+==========================================================================================
+  END OF SALARY-FUNDED SCALING SIMULATION
+==========================================================================================

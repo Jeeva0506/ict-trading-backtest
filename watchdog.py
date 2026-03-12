@@ -196,6 +196,15 @@ class TradingWatchdog:
             if HEARTBEAT_FILE.exists():
                 HEARTBEAT_FILE.unlink()
             
+            # Close any previous stdout/stderr file handles to prevent leaks
+            for attr in ('_stdout_file', '_stderr_file'):
+                old_fh = getattr(self, attr, None)
+                if old_fh and not old_fh.closed:
+                    try:
+                        old_fh.close()
+                    except Exception:
+                        pass
+            
             # Redirect stdout/stderr to files to prevent PIPE buffer deadlock
             stdout_log = log_dir / 'bot_stdout.log'
             stderr_log = log_dir / 'bot_stderr.log'

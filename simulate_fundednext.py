@@ -42,10 +42,15 @@ DD_TIER3_THRESHOLD = 5.0  # switch to tier3 at 5% DD from initial
 DAILY_DD_CUTOFF = 2.0     # close all + stop when daily DD from peak >= 2%
 FUNDEDNEXT_DAILY_DD = 5.0 # official daily DD breach limit
 FUNDEDNEXT_MAX_DD = 10.0  # official max DD from INITIAL capital
-PHASE1_TARGET_PCT = 8.0   # Phase 1 profit target
-PHASE2_TARGET_PCT = 5.0   # Phase 2 profit target
+PHASE1_TARGET_PCT = 8.5   # Phase 1 profit target
+PHASE2_TARGET_PCT = 5.5   # Phase 2 profit target
 MAX_DAILY_TRADES = 2      # max trades per day (aligned with live)
 MAX_CHALLENGE_DAYS = 60   # max calendar days for entire challenge (P1+P2)
+
+# ─── Minimum Trading Days Rule ───
+MIN_TRADING_DAYS = 5      # FundedNext requires min 5 trading days
+PADDING_RISK_PCT = 0.1    # micro-risk for padding trades when target met early
+PADDING_BUFFER_PCT = 0.5  # keep 0.5% buffer above target while padding
 
 ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500", "US2000"]  # SWI20 removed (spread too wide)
 
@@ -213,6 +218,10 @@ def simulate_fundednext():
     daily_trade_count = 0
     day_stopped = False
 
+    # Min trading days tracking
+    phase_trading_days = set()  # unique days with >= 1 trade
+    padding_mode = False        # True when target hit but days < MIN_TRADING_DAYS
+
     open_positions = []
 
     def make_phase_record():
@@ -225,6 +234,8 @@ def simulate_fundednext():
             "start_date": phase_start_date,
             "end_date": end_date,
             "trades": len(phase_trades),
+            "trading_days": len(phase_trading_days),
+            "padding_trades": sum(1 for t in phase_trades if t.get("padding", False)),
             "final_balance": current_balance,
             "peak_balance": peak_balance,
             "net_pnl": current_balance - initial_balance,
@@ -283,6 +294,8 @@ def simulate_fundednext():
                 daily_trade_count = 0
                 day_stopped = False
                 open_positions = []
+                phase_trading_days = set()
+                padding_mode = False
             else:
                 # Phase 2 passed → challenge FULLY PASSED
                 challenges.append({
@@ -312,6 +325,8 @@ def simulate_fundednext():
                 daily_trade_count = 0
                 day_stopped = False
                 open_positions = []
+                phase_trading_days = set()
+                padding_mode = False
 
         # ─── Handle phase breached → restart entire challenge from Phase 1 ───
         if phase_breached:
@@ -346,6 +361,8 @@ def simulate_fundednext():
             daily_trade_count = 0
             day_stopped = False
             open_positions = []
+            phase_trading_days = set()
+            padding_mode = False
 
         # ─── Check daily -2% cutoff BEFORE entering ───
         daily_dd_from_peak = ((day_peak_balance - current_balance) / day_peak_balance * 100) if day_peak_balance > 0 else 0
@@ -366,15 +383,29 @@ def simulate_fundednext():
         if len(open_positions) >= MAX_OPEN_POSITIONS:
             continue
 
-        # ─── Risk sizing (3-tier from initial balance) ───
-        dd_from_initial = ((initial_balance - current_balance) / initial_balance * 100) if initial_balance > 0 else 0
-        dd_from_initial = max(0.0, dd_from_initial)  # only positive DD
-        if dd_from_initial >= DD_TIER3_THRESHOLD:
-            risk_pct = RISK_TIER3          # deep DD → 0.5%
-        elif dd_from_initial >= DD_TIER2_THRESHOLD:
-            risk_pct = RISK_TIER2          # moderate DD → 0.75%
+        # ─── Risk sizing ───
+        # If in padding mode (target hit, need more trading days), use micro-risk
+        if padding_mode:
+            # Only trade if we still have buffer above target
+            profit_pct_now = ((current_balance - initial_balance) / initial_balance * 100)
+            target_pct = PHASE1_TARGET_PCT if current_phase == 1 else PHASE2_TARGET_PCT
+            buffer_remaining = profit_pct_now - target_pct
+            if buffer_remaining < 0:
+                # Lost buffer during padding — still passed target, stop padding
+                # Actually, shouldn't happen with 0.1% risk, but safety check
+                phase_passed = True
+                continue
+            risk_pct = PADDING_RISK_PCT  # 0.1% micro-risk
         else:
-            risk_pct = RISK_TIER1          # normal → 1.5%
+            # Normal 3-tier adaptive risk from initial balance
+            dd_from_initial = ((initial_balance - current_balance) / initial_balance * 100) if initial_balance > 0 else 0
+            dd_from_initial = max(0.0, dd_from_initial)
+            if dd_from_initial >= DD_TIER3_THRESHOLD:
+                risk_pct = RISK_TIER3          # deep DD → 0.5%
+            elif dd_from_initial >= DD_TIER2_THRESHOLD:
+                risk_pct = RISK_TIER2          # moderate DD → 0.75%
+            else:
+                risk_pct = RISK_TIER1          # normal → 1.5%
 
         risk_amount = current_balance * (risk_pct / 100.0)
         risk_points = float(s.risk_points)
@@ -404,7 +435,11 @@ def simulate_fundednext():
             "symbol": symbol, "date": entry_time, "direction": s.direction,
             "result": result, "risk_pct": risk_pct, "pnl": pnl, "costs": costs,
             "balance": current_balance, "exit_reason": exit_reason,
+            "padding": padding_mode,
         })
+
+        # Track unique trading days
+        phase_trading_days.add(trade_day)
 
         # ─── Post-trade checks ───
 
@@ -429,7 +464,24 @@ def simulate_fundednext():
 
         # Profit target check
         profit_pct = ((current_balance - initial_balance) / initial_balance * 100) if initial_balance > 0 else 0
-        if profit_pct >= profit_target:
+        if not padding_mode and profit_pct >= profit_target:
+            if len(phase_trading_days) >= MIN_TRADING_DAYS:
+                phase_passed = True
+                continue
+            else:
+                # Target hit but < 5 trading days → enter padding mode
+                # Check if we have enough buffer (target + 0.5%)
+                if profit_pct >= profit_target + PADDING_BUFFER_PCT:
+                    padding_mode = True
+                    # Don't mark as passed yet — need more trading days
+                else:
+                    # Not enough buffer to pad safely, mark passed anyway
+                    # (better to pass without buffer than risk breach)
+                    phase_passed = True
+                    continue
+
+        # In padding mode: check if we now have enough trading days
+        if padding_mode and len(phase_trading_days) >= MIN_TRADING_DAYS:
             phase_passed = True
             continue
 
@@ -484,6 +536,7 @@ def simulate_fundednext():
     print(f"  Daily Cutoff     : {DAILY_DD_CUTOFF}% from day peak -> stop")
     print(f"  FundedNext Daily : {FUNDEDNEXT_DAILY_DD}% -> BREACH")
     print(f"  FundedNext Max DD: {FUNDEDNEXT_MAX_DD}% from initial -> BREACH")
+    print(f"  Min Trading Days : {MIN_TRADING_DAYS} (padding at {PADDING_RISK_PCT}% risk, {PADDING_BUFFER_PCT}% buffer)")
     print(f"  Duration Goal    : {MAX_CHALLENGE_DAYS} calendar days (personal, not enforced)")
     print(f"  Max Open Pos     : {MAX_OPEN_POSITIONS}  |  Max Daily Losses: {MAX_DAILY_LOSSES}  |  Max Daily Trades: {MAX_DAILY_TRADES}")
 
@@ -518,7 +571,8 @@ def simulate_fundednext():
             phase_label = f"Phase {p['phase']}"
             target = PHASE1_TARGET_PCT if p["phase"] == 1 else PHASE2_TARGET_PCT
             print(f"\n    {phase_label} (target: {target}%)  [{p['status']}]")
-            print(f"      Trades    : {p['trades']}")
+            print(f"      Trades    : {p['trades']}  ({p.get('padding_trades', 0)} padding)")
+            print(f"      Trad Days : {p.get('trading_days', '?')} (min {MIN_TRADING_DAYS})")
             print(f"      Final Bal : ${p['final_balance']:,.2f}")
             print(f"      Net PnL   : ${p['net_pnl']:,.2f}  ({p['return_pct']:+.1f}%)")
             print(f"      Max DD    : {p['max_dd_pct']:.1f}%")

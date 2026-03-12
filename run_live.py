@@ -166,8 +166,29 @@ def run_test_mode():
     print("\n[OK] Test complete")
 
 
+def _acquire_bot_lock():
+    """Prevent duplicate bot instances. If another bot process is alive, exit."""
+    lock = Path(__file__).parent / 'live' / 'logs' / 'bot.lock'
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    if lock.exists():
+        try:
+            old_pid = int(lock.read_text().strip())
+            import psutil
+            if psutil.pid_exists(old_pid):
+                proc = psutil.Process(old_pid)
+                if 'python' in proc.name().lower():
+                    print(f"[ABORT] Bot already running (PID {old_pid}). Exiting.")
+                    sys.exit(0)
+        except Exception:
+            pass  # stale/corrupt lock — overwrite
+    lock.write_text(str(os.getpid()))
+    import atexit
+    atexit.register(lambda: lock.unlink(missing_ok=True))
+
+
 def run_live():
     """Start live trading"""
+    _acquire_bot_lock()
     show_banner()
     show_config()
     

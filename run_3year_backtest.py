@@ -17,9 +17,10 @@ from backtest_live_setup import (
     ACCOUNT_RULES, FUNDEDNEXT_RULES, MAX_OPEN_POSITIONS, MAX_DAILY_LOSSES,
     MAX_DAILY_TRADES, LEVERAGE, load_data, compute_htf_ema, get_htf_trend_for_day,
     get_adaptive_risk, StrategyICTClean,
+    get_vol_scaled_slippage, is_high_vol_event_day,
 )
 
-ALL_SYMBOLS = ["SPX500", "NDX100", "GER30", "US30", "US2000", "SWI20"]
+ALL_SYMBOLS = ["SPX500", "NDX100", "GER30", "US30", "US2000"]  # SWI20 removed (spread too wide)
 
 # Override data files to use 3-year M1 data
 THREE_YEAR_FILES = {
@@ -110,8 +111,15 @@ def run_portfolio(all_signals):
     skipped_reasons = {"max_positions": 0, "daily_loss_limit": 0, "adaptive_stop": 0,
                        "max_daily_trades": 0, "max_dd_breach": 0,
                        "spread_guard": 0, "price_drift": 0, "stale_signal": 0,
-                       "min_R": 0}
+                       "min_R": 0, "news_window": 0}
     account_terminated = False
+
+    # Pre-compute median R per symbol for vol-scaled slippage
+    from collections import defaultdict
+    _r_by_sym = defaultdict(list)
+    for sig in all_signals:
+        _r_by_sym[sig["symbol"]].append(float(sig["signal"].risk_points))
+    median_R = {sym: float(np.median(rs)) for sym, rs in _r_by_sym.items()}
 
     current_day = None
     day_peak_balance = STARTING_CAPITAL
@@ -154,10 +162,12 @@ def run_portfolio(all_signals):
             skipped_reasons["max_positions"] += 1
             continue
 
-        # ── LIVE FILTER: Minimum R guard (5 pts) ─────────────────────
+        # ── LIVE FILTER: Minimum R guard (per-index) ─────────────────
         # Rejects signals where risk (R) is too small. Tiny R means
-        # spread + slippage eats most of the edge. Live: MIN_R_POINTS=5.0
-        MIN_R_POINTS = 5.0
+        # spread + slippage eats most of the edge.
+        # SPX500/US2000 have smaller point values → 3 pt min; others 5 pt.
+        MIN_R_BY_SYMBOL = {"SPX500": 3.0, "US2000": 3.0}
+        MIN_R_POINTS = MIN_R_BY_SYMBOL.get(symbol, 5.0)
         if risk_points < MIN_R_POINTS:
             skipped_reasons["min_R"] += 1
             continue
@@ -209,8 +219,11 @@ def run_portfolio(all_signals):
         exit_reason = getattr(s, "exit_reason", None)
         pnl_points = float(getattr(s, "pnl_points", 0.0))
 
-        # Realistic costs
-        slippage_pts = TRADING_COSTS["slippage_points"].get(symbol, 0.5)
+        # Realistic costs — vol-scaled slippage
+        base_slippage = TRADING_COSTS["slippage_points"].get(symbol, 0.5)
+        high_vol = is_high_vol_event_day(entry_time, symbol)
+        slippage_pts = get_vol_scaled_slippage(
+            base_slippage, risk_points, median_R.get(symbol, risk_points), high_vol)
         spread_pts = TRADING_COSTS["spread_points"].get(symbol, 1.0)
         half_spread = spread_pts / 2.0
         entry_cost_pts = slippage_pts + half_spread

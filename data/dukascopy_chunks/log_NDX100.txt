@@ -1,0 +1,1 @@
+2026-03-11 23:30:25,010 - findatapy.market.datavendorweb - WARNING - Problem downloading.. https://www.dukascopy.com/datafeed/USATECHIDXUSD/2016/00/08/07h_ticks.bi5 HTTPConnectionPool(host='datafeed.dukascopy.com', port=80): Read timed out... will try again 0 occasion

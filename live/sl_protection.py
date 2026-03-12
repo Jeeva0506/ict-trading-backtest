@@ -449,13 +449,13 @@ def verify_sl_after_entry(ticket: int, expected_sl: float, expected_tp: float, s
     except Exception as e:
         if logger:
             logger.error(f"Exception in SL verification: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+            import traceback
+            logger.error(traceback.format_exc())
         
         # On exception, try emergency close
         try:
             emergency_close_position(ticket, f"Verification exception: {str(e)}")
-        except:
+        except Exception:
             pass
         return False
 
@@ -720,7 +720,9 @@ def monitor_open_positions() -> None:
             if account_info:
                 account_balance = account_info.balance
             else:
-                account_balance = 6000  # Fallback
+                # Fallback: use initial account size from env, not hardcoded
+                import os
+                account_balance = float(os.getenv('ACCOUNT_SIZE', '6000'))
             
             for position in positions:
                 ticket = position.ticket

@@ -963,15 +963,15 @@ class LiveTrader:
             self.strategies[symbol] = StrategyICTClean(
                 sl_buffer=cfg.get("sl_buffer", 1.0),
                 orb_minutes=cfg.get("orb_minutes", 15),
-                entry_hours=cfg.get("entry_hours", 2),
+                entry_hours=cfg.get("entry_hours", 3),
                 breakout_window_minutes=cfg.get("breakout_window_minutes", 60),
-                disp_mult=cfg.get("disp_mult", 1.3),       # C#12 default
-                body_min=cfg.get("body_min", 0.60),         # C#12 default
-                close_strength=cfg.get("close_strength", 0.25),  # C#12 default
-                breakout_margin=cfg.get("breakout_margin", 0.05),  # C#12 default
+                disp_mult=cfg.get("disp_mult", 1.0),       # Universal (aligned with backtest)
+                body_min=cfg.get("body_min", 0.70),         # Universal (aligned with backtest)
+                close_strength=cfg.get("close_strength", 0.25),
+                breakout_margin=cfg.get("breakout_margin", 0.15),  # Universal (aligned with backtest)
                 orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
                 min_sl_points=cfg.get("min_sl_points", 2.0),
-                max_sl_points=cfg.get("max_sl_points", 200.0),
+                max_sl_points=cfg.get("max_sl_points", 80.0),  # Aligned with backtest
                 tp3_r=2.5,
                 tp1_r=1.0,
                 debug=True,   # Enable detection logging for live diagnostics
@@ -1281,20 +1281,21 @@ class LiveTrader:
             })
             return None  # signal is old
 
-        # Price proximity guard: reject stale signal if market has moved
-        # more than 0.5R away from intended entry (would ruin the RR)
-        bid, ask = self.mt5.get_current_price(symbol)
-        if bid and sig.risk_points > 0:
-            mid_price = (bid + ask) / 2 if ask else bid
-            drift = abs(mid_price - sig.entry_price)
+        # Price drift guard — BACKTEST-MATCHED
+        # Compare signal_price (breakout/retest candle close) vs entry_price
+        # (next bar open). This is the same check the backtest uses.
+        # Previously this compared live market price vs entry_price, which
+        # blocked ~74% of valid signals due to execution latency.
+        signal_price = getattr(sig, 'signal_price', None)
+        if signal_price is not None and sig.risk_points > 0:
+            drift = abs(float(sig.entry_price) - float(signal_price))
             if drift > 0.5 * sig.risk_points:
-                # Throttled logging: first occurrence + every 10th to avoid spam
                 cnt = self._drift_log_count.get(symbol, 0) + 1
                 self._drift_log_count[symbol] = cnt
                 if cnt == 1 or cnt % 10 == 0:
-                    logger.info(f"{symbol}: Signal stale - price drifted {drift:.2f} pts "
+                    logger.info(f"{symbol}: Signal drift - entry vs signal {drift:.2f} pts "
                                 f"(> 0.5R = {0.5 * sig.risk_points:.2f}) [x{cnt}]")
-                if cnt == 1:  # record missed trade only once
+                if cnt == 1:
                     self.edge_guard.record_missed_trade(
                         symbol, f"price_drift_{drift:.1f}pts", sig.entry_price)
                 self._session_recap.setdefault(symbol, {}).update({
@@ -1319,6 +1320,8 @@ class LiveTrader:
             "htf_trend": htf_trend or "",
             "orb_range": orb_range,
             "signal_time": str(sig.entry_time),
+            "signal_price": getattr(sig, 'signal_price', sig.entry_price),
+            "breakout_time": str(sig.breakout_time) if getattr(sig, 'breakout_time', None) else "",
         }
 
     # ────────────────────────────────────────────────────────────────────
@@ -1339,7 +1342,7 @@ class LiveTrader:
         if self.trade_taken_today.get(symbol, False):
             return False, "already traded today"
         # Max trades per day across all symbols
-        if self.state.daily_trades >= FUNDEDNEXT_RULES.get("max_trades_per_day", 3):
+        if self.state.daily_trades >= FUNDEDNEXT_RULES.get("max_trades_per_day", 2):
             return False, "max daily trades reached"
         # DD check
         if self.dd_protection:
@@ -1355,6 +1358,11 @@ class LiveTrader:
         eg_can, eg_reason = self.edge_guard.can_trade()
         if not eg_can:
             return False, eg_reason
+        # Max open positions across ALL symbols (aligned with backtest MAX_OPEN_POSITIONS=2)
+        max_open = FUNDEDNEXT_RULES.get('max_open_positions', 2)
+        all_positions = self.mt5.get_open_positions()
+        if len(all_positions) >= max_open:
+            return False, f"max open positions ({max_open}) reached"
         # Existing position check (1 per symbol max)
         existing = self.mt5.get_open_positions(symbol)
         if len(existing) >= 1:
@@ -1407,7 +1415,9 @@ class LiveTrader:
         # Reject signals where R is too small for live execution.
         # Tiny R (e.g. 2.4 pts on US2000) means spread + slippage eat
         # most of the risk budget, guaranteeing > 1R losses.
-        MIN_R_POINTS = 5.0  # minimum 5 points risk for any symbol
+        # SPX500/US2000 have smaller point values → 3 pt min; others 5 pt.
+        MIN_R_BY_SYMBOL = {"SPX500": 3.0, "US2000": 3.0}
+        MIN_R_POINTS = MIN_R_BY_SYMBOL.get(symbol, 5.0)
         if sig["risk_points"] < MIN_R_POINTS:
             logger.warning(
                 f"{symbol}: MIN R GUARD — R={sig['risk_points']:.2f} pts < "
@@ -1440,30 +1450,17 @@ class LiveTrader:
         except Exception:
             pass
 
-        # ── PRE-ORDER DRIFT RECHECK ───────────────────────────────────
-        # Price may have moved during the 1-2s anti-detection delay.
-        # Recheck drift from signal entry — reject if price drifted > 0.5R
-        # This prevents placing orders with inflated SL distance.
+        # ── PRE-ORDER DRIFT — LOG ONLY (no rejection) ─────────────────
+        # Backtest does not have a pre-order drift guard. Removing the
+        # rejection here to match backtest behavior. We still LOG the drift
+        # for execution quality monitoring but do NOT block the trade.
         if expected_price and sig["risk_points"] > 0:
             drift_from_signal = abs(expected_price - sig["entry_price"])
             if drift_from_signal > 0.5 * sig["risk_points"]:
-                logger.warning(
-                    f"{symbol}: PRE-ORDER DRIFT — price moved {drift_from_signal:.2f} pts "
+                logger.info(
+                    f"{symbol}: PRE-ORDER DRIFT (info only) — price moved {drift_from_signal:.2f} pts "
                     f"from signal entry ({sig['entry_price']:.2f}) during delay. "
-                    f"Threshold 0.5R = {0.5 * sig['risk_points']:.2f}. Trade REJECTED.")
-                self.edge_guard.record_missed_trade(
-                    symbol, f"pre_order_drift_{drift_from_signal:.1f}pts",
-                    sig.get('entry_price', 0))
-                self.telegram.send_message(
-                    f"⚠️ {symbol}: Trade skipped — price drifted "
-                    f"{drift_from_signal:.1f} pts from signal entry during delay "
-                    f"(> 0.5R = {0.5 * sig['risk_points']:.1f})")
-                self._session_recap.setdefault(symbol, {}).update({
-                    'signal_found': True, 'signal_dir': sig.get('direction', ''),
-                    'reason': f'pre_order_drift ({drift_from_signal:.1f} pts > 0.5R)',
-                    'entry_price': sig.get('entry_price', 0),
-                })
-                return
+                    f"(0.5R = {0.5 * sig['risk_points']:.2f}). Proceeding with order.")
 
         # ── SPREAD-TO-R GUARD ──────────────────────────────────────────
         # Reject if spread > 30% of risk (R) — spread eats too much edge.
@@ -1570,6 +1567,7 @@ class LiveTrader:
                     "entry_time": str(datetime.now()),
                     "journal_trade_id": None,
                     "slippage_pts": slippage,
+                    "fill_drift_pts": abs(fill_price - sig["entry_price"]),
                     "spread_entry": spread_pts_entry,
                     "exec_latency_ms": exec_latency_ms,
                 }
@@ -1610,6 +1608,7 @@ class LiveTrader:
             "entry_time": str(datetime.now()),
             "journal_trade_id": None,  # set after add_trade
             "slippage_pts": slippage,
+            "fill_drift_pts": abs(fill_price - sig["entry_price"]),
             "spread_entry": spread_pts_entry,
             "exec_latency_ms": exec_latency_ms,
         }
@@ -1681,14 +1680,14 @@ class LiveTrader:
         self._save_state()
 
     # ────────────────────────────────────────────────────────────────────
-    #  Position management (ORB: BE at 1R, trail 1R buffer, TP at 2.5R)
+    #  Position management (ORB: BE at 1R, trail 0.5R buffer, TP at 2.5R)
     # ────────────────────────────────────────────────────────────────────
     def _manage_positions(self):
         """
         For each tracked position:
           1. Check if closed by broker/SL/TP
           2. Move SL to BE when 1R profit reached
-          3. Trail SL with 1.0R buffer after BE
+          3. Trail SL with 0.5R buffer after BE
           4. Force close near session end (no overnight)
           5. Detect missing SL and re-apply or emergency close
         """
@@ -1752,6 +1751,32 @@ class LiveTrader:
                     mfe_pts = round(info.get("max_favorable", 0) * pos_R, 2) if pos_R else 0
                     mae_pts = round(info.get("max_adverse", 0) * pos_R, 2) if pos_R else 0
                     pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
+                    # Compute DD% from initial balance
+                    _bal_after = self.state.current_balance + pnl
+                    _dd_pct = round(((ACCOUNT_SIZE - _bal_after)
+                                     / ACCOUNT_SIZE) * 100, 2) if ACCOUNT_SIZE else 0
+                    # Exit spread + exit slippage (from current tick at close time)
+                    _spread_exit = 0
+                    _exit_slip = 0
+                    try:
+                        _tick = mt5.symbol_info_tick(symbol)
+                        if _tick:
+                            _spread_exit = _tick.ask - _tick.bid
+                            # Exit slippage: diff between expected exit and actual
+                            if exit_reason == 'TP' and info.get('tp'):
+                                _exit_slip = round(abs(exit_price - info['tp']), 4)
+                            elif exit_reason == 'SL_HIT' and info.get('sl_init'):
+                                _exit_slip = round(abs(exit_price - info['sl_init']), 4)
+                    except Exception:
+                        pass
+                    # Risk tier label
+                    _risk_pct = self.dd_protection.get_adaptive_risk(_bal_after)
+                    if _risk_pct <= 0.5:
+                        _risk_tier = 'TIER 3'
+                    elif _risk_pct <= 0.75:
+                        _risk_tier = 'TIER 2'
+                    else:
+                        _risk_tier = 'TIER 1'
                     self.journal.close_trade(trade_id, {
                         "exit_price": exit_price,
                         "exit_reason": exit_reason,
@@ -1761,8 +1786,15 @@ class LiveTrader:
                         "mfe_points": mfe_pts,
                         "mae_points": mae_pts,
                         "be_hit": "Yes" if info.get("hit_be") else "No",
-                        "balance_after": self.state.current_balance + pnl,
-                        "drawdown": 0,
+                        "balance_after": _bal_after,
+                        "drawdown": _dd_pct,
+                        "spread_exit": round(_spread_exit, 4),
+                        "exit_slippage": round(_exit_slip, 4),
+                        "commission": details.get('commission', 0),
+                        "swap": details.get('swap', 0),
+                        "risk_tier": _risk_tier,
+                        "point_value": self._get_point_value(symbol),
+                        "lots": info.get('volume', 0),
                     })
                 
                 # EdgeGuard: record for rolling metrics
@@ -1778,6 +1810,7 @@ class LiveTrader:
                     'pnl': pnl,
                     'actual_rr': _actual_rr,
                     'slippage_pts': info.get('slippage_pts', 0),
+                    'fill_drift_pts': info.get('fill_drift_pts', 0),
                     'spread_entry': info.get('spread_entry', 0),
                     'balance_after': self.state.current_balance + pnl,
                     'session': self._get_session_name(symbol),
@@ -1787,6 +1820,14 @@ class LiveTrader:
                     self.telegram.critical_alert("EDGE DEGRADED",
                         f"Auto-stop: {'; '.join(self.edge_guard.degradation_reasons)}\n"
                         f"Use /start to override.")
+
+                # Level 1 Audit: send report via Telegram at exactly 20 trades
+                if hasattr(self.edge_guard, '_level1_audit_report') and self.edge_guard._level1_audit_report:
+                    audit_text = self.edge_guard._level1_audit_report
+                    self.telegram.send_message(
+                        f"📋 <b>LEVEL 1 EXECUTION AUDIT</b>\n\n"
+                        f"<pre>{audit_text[:3800]}</pre>")
+                    self.edge_guard._level1_audit_report = None
 
                 self.telegram.trade_closed(
                     symbol=symbol,
@@ -1877,6 +1918,11 @@ class LiveTrader:
                             mfe_pts = round(info.get("max_favorable", 0) * R, 2) if R else 0
                             mae_pts = round(info.get("max_adverse", 0) * R, 2) if R else 0
                             pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
+                            # Compute DD% and risk tier for session close
+                            _sc_bal = self.state.current_balance + pnl
+                            _sc_dd = round(((ACCOUNT_SIZE - _sc_bal) / ACCOUNT_SIZE) * 100, 2) if ACCOUNT_SIZE else 0
+                            _sc_risk = self.dd_protection.get_adaptive_risk(_sc_bal)
+                            _sc_tier = 'TIER 3' if _sc_risk <= 0.5 else ('TIER 2' if _sc_risk <= 0.75 else 'TIER 1')
                             self.journal.close_trade(trade_id, {
                                 "exit_price": current_price,
                                 "exit_reason": "SESSION_CLOSE",
@@ -1886,8 +1932,13 @@ class LiveTrader:
                                 "mfe_points": mfe_pts,
                                 "mae_points": mae_pts,
                                 "be_hit": "Yes" if info.get("hit_be") else "No",
-                                "balance_after": self.state.current_balance + pnl,
-                                "drawdown": 0,
+                                "balance_after": _sc_bal,
+                                "drawdown": _sc_dd,
+                                "commission": 0,
+                                "swap": 0,
+                                "risk_tier": _sc_tier,
+                                "point_value": self._get_point_value(symbol),
+                                "lots": info.get('volume', 0),
                             })
                         
                         self.telegram.trade_closed(symbol, "SESSION_CLOSE", pnl)
@@ -1908,6 +1959,7 @@ class LiveTrader:
                             'pnl': pnl,
                             'actual_rr': _fc_rr,
                             'slippage_pts': info.get('slippage_pts', 0),
+                            'fill_drift_pts': info.get('fill_drift_pts', 0),
                             'spread_entry': info.get('spread_entry', 0),
                             'balance_after': self.state.current_balance + pnl,
                             'session': self._get_session_name(symbol),
@@ -1955,12 +2007,12 @@ class LiveTrader:
                     logger.info(f"BE triggered on {ticket} ({symbol}): SL -> {new_sl:.2f}")
                     self.telegram.sl_moved(symbol, current_sl, new_sl, "breakeven")
 
-            # ── Trailing after BE (1.0R buffer) ────────────────────────
+            # ── Trailing after BE (0.5R buffer) ────────────────────────
             if info["hit_be"]:
                 if unrealized_r > info.get("max_favorable", 0):
                     info["max_favorable"] = unrealized_r
 
-                trail_r = max(0.0, info["max_favorable"] - 1.0)
+                trail_r = max(0.0, info["max_favorable"] - 0.5)
                 if direction in ("bullish", "buy"):
                     trail_sl = entry + trail_r * R
                     if trail_sl > current_sl + 0.01:
@@ -2094,6 +2146,9 @@ class LiveTrader:
                                 return result
 
                     result['pnl'] = sum(d.profit + d.commission + d.swap for d in deals)
+                    result['commission'] = sum(d.commission for d in deals)
+                    result['swap'] = sum(d.swap for d in deals)
+                    result['gross_pnl'] = sum(d.profit for d in deals)
                     # Find the closing deal (DEAL_ENTRY_OUT = 1)
                     for d in deals:
                         if d.entry == 1:  # DEAL_ENTRY_OUT
@@ -2304,8 +2359,8 @@ class LiveTrader:
                         self.report_scheduler.check_and_send_reports(
                             account_r["balance"], dd_r["daily_dd"], dd_r["overall_dd"]
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Report scheduler error: {e}")
 
                 # ── Account + DD check ─────────────────────────────────
                 account = self.mt5.get_account_info()

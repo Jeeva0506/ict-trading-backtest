@@ -27,15 +27,16 @@ LIVE_INDEX_CONFIG = {
         "sl_buffer": 1.0,
         "name": "S&P 500",
         "orb_minutes": 15,
-        "entry_hours": 2,
+        "entry_hours": 3,
         "breakout_window_minutes": 60,
-        "disp_mult": 1.3,
-        "body_min": 0.60,
+        # Universal params (anti-curve-fit): testing standardization
+        "disp_mult": 1.0,
+        "body_min": 0.70,
         "close_strength": 0.25,
-        "breakout_margin": 0.05,
+        "breakout_margin": 0.15,
         "orb_range_min_mult": 0.5,
         "min_sl_points": 2.0,
-        "max_sl_points": 100.0,
+        "max_sl_points": 25.0,
     },
     "US30": {
         "local_file": "US30_1YEAR_M1.csv",
@@ -46,15 +47,16 @@ LIVE_INDEX_CONFIG = {
         "sl_buffer": 5.0,
         "name": "Dow Jones 30",
         "orb_minutes": 15,
-        "entry_hours": 2,
+        "entry_hours": 3,
         "breakout_window_minutes": 60,
-        "disp_mult": 1.3,
-        "body_min": 0.60,
+        # Universal params (anti-curve-fit): testing standardization
+        "disp_mult": 1.0,
+        "body_min": 0.70,
         "close_strength": 0.25,
-        "breakout_margin": 0.05,
+        "breakout_margin": 0.15,
         "orb_range_min_mult": 0.5,
-        "min_sl_points": 10.0,
-        "max_sl_points": 200.0,
+        "min_sl_points": 15.0,
+        "max_sl_points": 150.0,
     },
     "NDX100": {
         "local_file": "NDX100_1YEAR_M1.csv",
@@ -65,7 +67,7 @@ LIVE_INDEX_CONFIG = {
         "sl_buffer": 5.0,
         "name": "Nasdaq 100",
         "orb_minutes": 15,
-        "entry_hours": 2,
+        "entry_hours": 3,
         "breakout_window_minutes": 60,
         # Universal params (anti-curve-fit): validated train 2024 + OOS 2023/2025
         "disp_mult": 1.0,
@@ -74,7 +76,7 @@ LIVE_INDEX_CONFIG = {
         "breakout_margin": 0.15,
         "orb_range_min_mult": 0.5,
         "min_sl_points": 10.0,
-        "max_sl_points": 200.0,
+        "max_sl_points": 80.0,
     },
     "GER30": {
         "local_file": "GER30_1YEAR_M1.csv",
@@ -86,7 +88,7 @@ LIVE_INDEX_CONFIG = {
         "sl_buffer": 5.0,
         "name": "DAX 30",
         "orb_minutes": 15,
-        "entry_hours": 2,
+        "entry_hours": 3,
         "breakout_window_minutes": 60,
         # Universal params (anti-curve-fit): validated train 2024 + OOS 2023/2025
         "disp_mult": 1.0,
@@ -95,7 +97,7 @@ LIVE_INDEX_CONFIG = {
         "breakout_margin": 0.15,
         "orb_range_min_mult": 0.5,
         "min_sl_points": 10.0,
-        "max_sl_points": 200.0,
+        "max_sl_points": 80.0,
     },
     "FRA40": {
         "local_file": "FRA40_1YEAR_M1.csv",
@@ -115,7 +117,7 @@ LIVE_INDEX_CONFIG = {
         "breakout_margin": 0.10,
         "orb_range_min_mult": 0.5,
         "min_sl_points": 2.0,
-        "max_sl_points": 100.0,
+        "max_sl_points": 30.0,
     },
     "HK50": {
         "local_file": "HK50_1YEAR_M1.csv",
@@ -248,7 +250,7 @@ LIVE_INDEX_CONFIG = {
         "session_start_minute": 0,
         "session_end_hour": 18,
         "session_end_minute": 30,
-        "sl_buffer": 2.0,
+        "sl_buffer": 1.0,
         "name": "UK 100",
         "orb_minutes": 15,
         "entry_hours": 2,
@@ -258,8 +260,8 @@ LIVE_INDEX_CONFIG = {
         "close_strength": 0.30,
         "breakout_margin": 0.10,
         "orb_range_min_mult": 0.5,
-        "min_sl_points": 5.0,
-        "max_sl_points": 200.0,
+        "min_sl_points": 2.0,
+        "max_sl_points": 25.0,
     },
     "US2000": {
         "local_file": "US2000_M1_CLEAN.csv",
@@ -271,7 +273,7 @@ LIVE_INDEX_CONFIG = {
         "sl_buffer": 1.0,
         "name": "Russell 2000",
         "orb_minutes": 15,
-        "entry_hours": 2,
+        "entry_hours": 3,
         "breakout_window_minutes": 60,
         # Universal params (anti-curve-fit): validated train 2024 + OOS 2023/2025
         "disp_mult": 1.0,
@@ -289,11 +291,11 @@ ADAPTIVE_RISK = {
     "default_risk_percent": 1.5,
     "tier2_risk_percent": 0.75,
     "tier3_risk_percent": 0.5,
-    "reduced_risk_percent": 0.75,       # legacy compat = tier2
-    "tier2_threshold": 3.0,             # 3% DD from initial -> tier2
-    "tier3_threshold": 5.0,             # 5% DD from initial -> tier3
-    "daily_dd_reduce_threshold": 1.0,   # legacy: daily DD reduce
-    "daily_dd_stop_threshold": 2.0,     # daily DD stop trading
+    "reduced_risk_percent": 0.75,        # legacy compat = tier2
+    "tier2_threshold": 3.0,              # 3% DD from peak -> tier2
+    "tier3_threshold": 5.0,              # 5% DD from peak -> tier3
+    "daily_dd_reduce_threshold": 1.0,    # legacy: daily DD reduce
+    "daily_dd_stop_threshold": 2.0,      # daily DD stop trading
 }
 
 ACCOUNT_RULES = {"starting_balance": 6000.0, "max_drawdown_pct": 10.0}  # aligned with FundedNext 10% max DD
@@ -314,7 +316,7 @@ TRADING_COSTS = {
 
 # FundedNext account rules (Stellar challenge, funded phase)
 FUNDEDNEXT_RULES = {
-    "daily_dd_pct": 5.0,      # max daily drawdown from day's starting/peak balance
+    "daily_dd_pct": 3.0,      # max daily drawdown (aligned with live 3%)
     "max_dd_pct": 10.0,       # max trailing drawdown from peak equity
     "profit_target_pct": None, # no target in funded phase (just trade)
 }
@@ -324,6 +326,46 @@ MAX_OPEN_POSITIONS = 2
 MAX_DAILY_LOSSES = 2          # Max losing trades per day across all symbols
 MAX_DAILY_TRADES = 2           # Max total trades per day (matches live config)
 LEVERAGE = 100
+
+
+import math as _math
+
+
+def get_vol_scaled_slippage(base_slippage: float, risk_points: float,
+                            median_R: float, is_high_vol_day: bool = False) -> float:
+    """Scale slippage by volatility (R) relative to symbol's median R.
+
+    Higher R = more volatile session = more slippage in reality.
+    sqrt scaling prevents over-penalizing: 2× R → 1.41× slippage.
+    On high-vol event days (NFP Friday), adds 50% penalty.
+    Capped at 3× base to avoid unrealistic extremes.
+    """
+    if median_R <= 0 or risk_points <= 0:
+        return base_slippage
+    vol_ratio = risk_points / median_R
+    multiplier = max(1.0, _math.sqrt(vol_ratio))
+    scaled = base_slippage * min(multiplier, 3.0)
+    if is_high_vol_day:
+        scaled *= 1.5
+    return round(scaled, 4)
+
+
+def is_high_vol_event_day(entry_time, symbol: str) -> bool:
+    """Detect if the trading day is a known high-volatility event day.
+
+    NFP Friday: First Friday of month (affects all US indices).
+    The event itself (8:30 AM ET) is before the session opens but
+    the entire session is more volatile, warrants extra slippage.
+    """
+    usd_symbols = {'SPX500', 'NDX100', 'US30', 'US2000'}
+    if symbol not in usd_symbols:
+        return False
+    # entry_time is in EET (MT5 server time). Approximate ET = EET - 7h.
+    et_approx = entry_time - pd.Timedelta(hours=7)
+    # NFP: First Friday of month (day <= 7 and Friday)
+    if et_approx.day <= 7 and et_approx.weekday() == 4:
+        return True
+    return False
 
 
 def load_data(filename: str) -> pd.DataFrame:
@@ -367,9 +409,8 @@ def get_adaptive_risk(current_balance: float, day_peak_balance: float,
         if overall_dd >= tier2_dd:
             return ADAPTIVE_RISK.get("tier2_risk_percent", 0.75), False
 
-    # Legacy daily DD reduce (kept for backward compat)
-    if daily_dd_pct >= ADAPTIVE_RISK["daily_dd_reduce_threshold"]:
-        return ADAPTIVE_RISK.get("tier2_risk_percent", 0.75), False
+    # Legacy daily DD reduce removed — live does NOT have this path.
+    # Keeping backtest aligned with live: overall DD tiers are the only triggers.
     return ADAPTIVE_RISK["default_risk_percent"], False
 
 

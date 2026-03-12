@@ -73,6 +73,19 @@ class TradeJournal:
                     cell.alignment = Alignment(horizontal="center")
                 wb.save(self.journal_path)
                 logger.info("Migrated to v3 schema (40 columns)")
+
+            # v3 → v4 migration: add commission/swap/risk_tier columns (40 → 43)
+            current_headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+            if "Commission" not in current_headers:
+                logger.info("Migrating trade journal to v4 (adding Commission/Swap/Risk Tier)...")
+                new_cols = ["Commission", "Swap", "Risk Tier"]
+                for i, hdr in enumerate(new_cols, len(current_headers) + 1):
+                    cell = ws.cell(row=1, column=i, value=hdr)
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center")
+                wb.save(self.journal_path)
+                logger.info("Migrated to v4 schema (43 columns)")
         except Exception as e:
             logger.warning(f"Schema migration check failed: {e}")
     
@@ -124,6 +137,9 @@ class TradeJournal:
             "Exit Slip Pts",     # AL - exit slippage in points
             "Session",           # AM - US/EU/Other
             "Weekday",           # AN - Monday-Friday
+            "Commission",        # AO - broker commission ($)
+            "Swap",              # AP - broker swap ($)
+            "Risk Tier",         # AQ - TIER 1/2/3 at exit
         ]
         ws_trades.append(headers)
         
@@ -280,8 +296,8 @@ class TradeJournal:
                 # MFE / MAE
                 mfe_pts = exit_data.get('mfe_points', '')
                 mae_pts = exit_data.get('mae_points', '')
-                mfe_r = round(mfe_pts / risk_pts, 2) if mfe_pts and risk_pts else ''
-                mae_r = round(mae_pts / risk_pts, 2) if mae_pts and risk_pts else ''
+                mfe_r = round(mfe_pts / risk_pts, 2) if mfe_pts is not None and mfe_pts != '' and risk_pts else ''
+                mae_r = round(mae_pts / risk_pts, 2) if mae_pts is not None and mae_pts != '' and risk_pts else ''
 
                 # Time in trade
                 entry_time_str = ws.cell(row=row_num, column=3).value  # C: Time
@@ -313,6 +329,9 @@ class TradeJournal:
                 ws.cell(row=row_num, column=34, value=exit_data.get('drawdown', 0))       # AH
                 ws.cell(row=row_num, column=37, value=exit_data.get('spread_exit', ''))   # AK
                 ws.cell(row=row_num, column=38, value=exit_data.get('exit_slippage', '')) # AL
+                ws.cell(row=row_num, column=41, value=exit_data.get('commission', ''))    # AO
+                ws.cell(row=row_num, column=42, value=exit_data.get('swap', ''))          # AP
+                ws.cell(row=row_num, column=43, value=exit_data.get('risk_tier', ''))     # AQ
                 
                 # Color code P&L
                 if pnl > 0:
@@ -616,8 +635,8 @@ class ReportScheduler:
             self.send_daily_report(yesterday, balance, daily_dd, overall_dd)
             self.last_daily_report = today
         
-        # Weekly report on Saturday at 8:00 AM
-        if now.weekday() == 5 and now.hour == 8 and now.minute < 10 and self.last_weekly_report != today:
+        # Weekly report on Friday at 8:00 PM (bot is still running, unlike Saturday)
+        if now.weekday() == 4 and now.hour == 20 and now.minute < 10 and self.last_weekly_report != today:
             self.send_weekly_report(balance)
             self.last_weekly_report = today
     

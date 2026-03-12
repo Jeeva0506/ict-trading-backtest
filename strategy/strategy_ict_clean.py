@@ -81,9 +81,15 @@ class StrategyICTClean:
         close_strength: float = 0.25,
         breakout_margin: float = 0.05,
         orb_range_min_mult: float = 0.5,
+        # --- ORB filter mode for A/B/C testing ---
+        orb_filter_mode: str = "current",       # "current", "atr", "hybrid"
+        atr_pct: float = 0.35,                   # ORB <= atr_pct * ATR(14)
         # --- exits ---
         tp1_r: float = 1.0,                        # BE trigger level
         tp3_r: float = 2.5,                        # actual TP target
+        trail_buffer_r: float = 0.5,                # trail SL = MFE - trail_buffer_r
+        # --- second chance rule ---
+        allow_second_chance: bool = False,           # if True: lose trade #1 → allow opposite dir trade #2
         **_kwargs,                                  # absorb legacy params from old callers
     ):
         self.sl_buffer = float(sl_buffer)
@@ -102,11 +108,20 @@ class StrategyICTClean:
         self.breakout_margin = float(breakout_margin)
         self.orb_range_min_mult = float(orb_range_min_mult)
 
+        # ORB filter mode
+        self.orb_filter_mode = str(orb_filter_mode)  # "current", "atr", "hybrid"
+        self.atr_pct = float(atr_pct)
+
         # Single target system
         self.be_trigger_r = float(tp1_r)       # move SL to BE at this R
         self.tp_r = float(tp3_r)               # single TP target
         self.tp1_r = float(tp1_r)
         self.tp3_r = float(tp3_r)
+        self.trail_buffer_r = float(trail_buffer_r)  # trail buffer in R
+
+        # Second chance rule
+        self.allow_second_chance = bool(allow_second_chance)
+        self._second_chance_dir = None  # set at runtime after trade #1 loses
 
         self.debug_rows: List[Dict[str, Any]] = []
 
@@ -138,8 +153,8 @@ class StrategyICTClean:
         """
         Simulation with BE + wide trailing stop:
         1. SL at initial level until price reaches 1R → move SL to BE (entry price)
-        2. After BE, trail with 1.5R buffer: SL = entry + max(0, MFE - 1.5R)
-           This locks profit gradually while giving room to reach 2.5R TP.
+        2. After BE, trail with 0.5R buffer: SL = entry + max(0, MFE - 0.5R)
+           This locks profit aggressively — tighter trail, more wins.
         3. TP at tp_r × R (2.5R)
         4. Force close 15 min before session end
         """
@@ -222,17 +237,17 @@ class StrategyICTClean:
                     t.stop_loss = t.entry_price
                     self._log(event="BE_TRIGGER", time=ts, price=be_price)
 
-            # --- Wide trailing after BE: lock profit gradually ---
-            # Trail buffer of 1.0R: SL = entry + max(0, MFE - 1.0R)
-            # Locks profit earlier to boost WR while still allowing
-            # trades room to reach 2.5R TP target.
+            # --- Tight trailing after BE: lock profit aggressively ---
+            # Trail buffer of 0.5R: SL = entry + max(0, MFE - 0.5R)
+            # Tighter trail locks profit earlier — fewer TP hits but
+            # much higher WR and lower DD. A/B tested: +17% PnL, -4.7% DD.
             if hit_be:
                 current_r = ((hi - entry) / R) if direction == "bullish" else ((entry - lo) / R)
                 if current_r > max_favorable:
                     max_favorable = current_r
 
-                # Trail when MFE exceeds 1.0R (after BE)
-                trail_r = max(0.0, max_favorable - 1.0)
+                # Trail when MFE exceeds buffer (after BE)
+                trail_r = max(0.0, max_favorable - self.trail_buffer_r)
                 if direction == "bullish":
                     new_sl = entry + trail_r * R
                     if new_sl > t.stop_loss:
@@ -256,7 +271,7 @@ class StrategyICTClean:
 
     # ----------------- main -----------------
 
-    def generate_signals(self, df: pd.DataFrame, htf_trend: Optional[str] = None) -> List[TradeSignalICT]:
+    def generate_signals(self, df: pd.DataFrame, htf_trend: Optional[str] = None, daily_atr: Optional[float] = None) -> List[TradeSignalICT]:
         """
         Expects df already sliced to the session window.
         htf_trend: "bullish" or "bearish" from 50/200 EMA on H1 (higher timeframe filter).
@@ -264,6 +279,7 @@ class StrategyICTClean:
         Returns a list of completed TradeSignalICT objects (entry + exit filled).
         """
         self.debug_rows = []
+        self._second_chance_dir = None  # reset each session
         out: List[TradeSignalICT] = []
 
         if df is None or len(df) < 30:
@@ -297,17 +313,40 @@ class StrategyICTClean:
 
         # VOLATILITY CONTRACTION FILTER (research-backed: 3x expectancy)
         # Only trade when ORB is compressed (coiled spring).
-        # A narrow ORB relative to its own candles' avg range means the market
-        # is consolidating → breakout is more likely to produce a trend day.
         orb_candle_ranges = orb["high"] - orb["low"]
         orb_avg_candle_range = float(orb_candle_ranges.mean())
         orb_median_candle_range = float(orb_candle_ranges.median())
-        # ORB total range vs what you'd expect if each candle was trending
-        # If ORB range < expected (candles overlapping = compression), take the trade
         expected_range = orb_avg_candle_range * len(orb) * 0.40  # 40% = moderate compression filter
-        if orb_range > expected_range and expected_range > 0:
+
+        # --- Version A: Current micro-volatility filter ---
+        current_pass = not (orb_range > expected_range and expected_range > 0)
+
+        # --- Version B: ATR(14) filter ---
+        atr_pass = True
+        if daily_atr is not None and daily_atr > 0:
+            atr_threshold = self.atr_pct * daily_atr
+            atr_pass = (orb_range <= atr_threshold)
+
+        # Apply filter based on mode
+        if self.orb_filter_mode == "current":
+            orb_ok = current_pass
+        elif self.orb_filter_mode == "atr":
+            if daily_atr is None or daily_atr <= 0:
+                orb_ok = current_pass  # fallback if no ATR available
+            else:
+                orb_ok = atr_pass
+        elif self.orb_filter_mode == "hybrid":
+            if daily_atr is None or daily_atr <= 0:
+                orb_ok = current_pass  # fallback if no ATR available
+            else:
+                orb_ok = current_pass and atr_pass  # must pass BOTH
+        else:
+            orb_ok = current_pass  # default to current
+
+        if not orb_ok:
             self._log(event="ORB_REJECT", time=session_start, reason="wide_orb",
-                      orb_range=round(orb_range, 2), expected=round(expected_range, 2))
+                      orb_range=round(orb_range, 2), expected=round(expected_range, 2),
+                      mode=self.orb_filter_mode)
             return out
 
         self._log(event="ORB", time=session_start, orbH=orbH, orbL=orbL, orb_range=orb_range)
@@ -337,8 +376,9 @@ class StrategyICTClean:
         scan["avg_range"] = scan["range"].rolling(self.lookback_ranges, min_periods=3).mean()
 
         start_i = max(3, self.lookback_ranges)
+        i = start_i
 
-        for i in range(start_i, len(scan)):
+        while i < len(scan):
             ts = scan.at[i, "ts"]
             if ts >= cutoff_close:
                 break
@@ -359,19 +399,19 @@ class StrategyICTClean:
             elif c < orbL - margin:
                 direction = "bearish"
             else:
-                continue
+                i += 1; continue
 
             # --- Filter 1: Displacement ---
             avg_r = float(scan.at[i, "avg_range"]) if pd.notna(scan.at[i, "avg_range"]) else None
             if avg_r is None or avg_r <= 0:
-                continue
+                i += 1; continue
             if candle_range < self.disp_mult * avg_r:
-                continue
+                i += 1; continue
 
             # --- Filter 2: Body % ---
             body_pct = abs(c - o) / candle_range if candle_range > 0 else 0.0
             if body_pct < self.body_min:
-                continue
+                i += 1; continue
 
             # --- Filter 3: Close strength (close must be in correct portion) ---
             if candle_range > 0:
@@ -379,16 +419,20 @@ class StrategyICTClean:
                     # Close should be in the upper portion of the candle
                     close_pos = (c - l) / candle_range
                     if close_pos < (1.0 - self.close_strength):
-                        continue
+                        i += 1; continue
                 else:
                     # Close should be in the lower portion of the candle
                     close_pos = (h - c) / candle_range
                     if close_pos < (1.0 - self.close_strength):
-                        continue
+                        i += 1; continue
 
             # --- Filter 4: Trend alignment (HTF EMA or ORB bias) ---
-            if direction != trend_filter:
-                continue
+            # On second-chance trade, require OPPOSITE direction from trade #1
+            if self._second_chance_dir is not None:
+                if direction != self._second_chance_dir:
+                    i += 1; continue
+            elif direction != trend_filter:
+                i += 1; continue
 
             # --- PULLBACK RETEST ENTRY ---
             # Wait for price to pull back to ORB level and confirm hold.
@@ -434,7 +478,7 @@ class StrategyICTClean:
                 # No pullback — use direct breakout entry (next bar)
                 next_idx = df_idx + 1
                 if next_idx >= len(w):
-                    continue
+                    i += 1; continue
                 entry_price = float(w.iloc[next_idx]["open"])
                 if direction == "bullish":
                     sl = l - self.sl_buffer
@@ -442,7 +486,7 @@ class StrategyICTClean:
                     sl = h + self.sl_buffer
 
             if next_idx is None or entry_price is None or sl is None:
-                continue
+                i += 1; continue
 
             # Re-calculate R from actual entry price
             if direction == "bullish":
@@ -451,7 +495,7 @@ class StrategyICTClean:
                 R = sl - entry_price
 
             if R <= 0 or R < self.min_sl or R > self.max_sl:
-                continue
+                i += 1; continue
 
             self._log(
                 event="ENTRY_SIGNAL",
@@ -483,6 +527,41 @@ class StrategyICTClean:
             trade.signal_price = signal_close
             trade.breakout_time = ts  # breakout candle timestamp
             out.append(trade)
-            break  # 1 trade per day
+
+            # ── SECOND-CHANCE RULE ──
+            # If allow_second_chance is enabled:
+            #   - If trade #1 is profitable → done for the day
+            #   - If trade #1 loses → continue scanning for ONE more trade
+            #     in the OPPOSITE direction only
+            # If disabled (default): 1 trade per day (original behavior)
+            if not self.allow_second_chance:
+                break  # 1 trade per day (original)
+
+            if trade.pnl_points > 0:
+                break  # trade #1 won → done for the day
+
+            if len(out) >= 2:
+                break  # already took 2 trades → done
+
+            # Trade #1 lost → allow scanning to continue, but ONLY for
+            # the opposite direction. We resume from after trade #1's
+            # exit bar to avoid overlapping.
+            self._second_chance_dir = (
+                "bearish" if direction == "bullish" else "bullish"
+            )
+            # Advance scan index past trade #1's exit
+            if trade.exit_time is not None:
+                new_start_found = False
+                for j in range(i + 1, len(scan)):
+                    scan_ts = scan.at[j, "ts"]
+                    if scan_ts > trade.exit_time:
+                        i = j  # resume from this bar
+                        new_start_found = True
+                        break
+                if not new_start_found:
+                    break  # no more scan bars after exit
+            else:
+                i += 1
+            continue
 
         return out

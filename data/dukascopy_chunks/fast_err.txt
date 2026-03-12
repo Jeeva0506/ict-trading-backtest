@@ -1,0 +1,49 @@
+23:43:34 [INFO] ============================================================
+23:43:34 [INFO]   DUKASCOPY FAST DOWNLOADER (Async)
+23:43:34 [INFO]   Indices: SPX500, NDX100, US30, GER30, US2000
+23:43:34 [INFO]   Period: 2016-01-01 \u2192 2026-03-11
+23:43:34 [INFO]   Concurrency: 100 requests
+23:43:34 [INFO] ============================================================
+23:44:04 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:44:34 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:45:04 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:45:34 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:46:04 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:46:34 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:47:04 [INFO]   \u2500\u2500\u2500 PROGRESS \u2500\u2500\u2500
+    SPX500     5/123 (  4.1%) [starting]
+    NDX100     0/123 (  0.0%) [starting]
+    US30       0/123 (  0.0%) [starting]
+    GER30      0/123 (  0.0%) [starting]
+    US2000     0/123 (  0.0%) [starting]
+23:47:18 [INFO]   SPX500: [6/123] 2016-06 -> 9,456 M1 bars (224.1s)

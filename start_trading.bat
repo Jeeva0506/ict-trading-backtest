@@ -4,7 +4,7 @@
 
 echo ================================================
 echo    ORB Trading Bot - Starting with Watchdog...
-echo    SPX500 / NDX100 / GER30 / US30 / SWI20 / US2000
+echo    SPX500 / NDX100 / GER30 / FRA40 / US30 / US2000
 echo ================================================
 echo.
 echo This runs CONTINUOUSLY until you close the window.

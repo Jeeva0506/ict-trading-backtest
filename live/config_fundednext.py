@@ -40,6 +40,7 @@ FUNDEDNEXT_RULES = {
     'daily_drawdown_stop': float(os.getenv('DAILY_DRAWDOWN_STOP', '2.0')),
     'risk_per_trade_percent': float(os.getenv('RISK_PER_TRADE', '1.0')),
     'max_trades_per_day': 2,           # REDUCED from 3: limits correlated loss clusters on bad days
+    'max_open_positions': 2,           # Max concurrent positions across all symbols (aligned with backtest)
     'news_buffer_before_minutes': 5,    # Block 5 min BEFORE high-impact news
     'news_buffer_after_minutes': 15,    # Block 15 min AFTER high-impact news
 }
@@ -120,22 +121,22 @@ PROFITABLE_INDICES = {
         'tick_size': 0.01,
         'tick_value': 0.01,         # $ per tick per lot
         'currency': 'USD',
-        'point_value': 1.0,         # $ per point per lot (fallback; live uses broker data)
+        'point_value': 10.0,        # $ per point per lot (verified via MT5 order_calc_profit)
         'sl_buffer': 1.0,           # SL buffer in points
         'min_sl_distance': 2.0,     # Min SL distance for valid trade
-        'max_sl_distance': 100.0,   # Max SL distance for valid trade
+        'max_sl_distance': 25.0,    # Max SL distance (aligned with backtest)
         
-        # ORB strategy params (Candidate #12 — optimized for frequency)
+        # ORB strategy params — Universal (anti-curve-fit, aligned with backtest)
         'orb_minutes': 15,
-        'entry_hours': 2,
+        'entry_hours': 3,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.3,
-        'body_min': 0.60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
         'close_strength': 0.25,
-        'breakout_margin': 0.05,
+        'breakout_margin': 0.15,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 2.0,
-        'max_sl_points': 100.0,
+        'max_sl_points': 25.0,
         
         # Trading Hours (Local market time)
         'market_open_hour': 9,
@@ -161,14 +162,14 @@ PROFITABLE_INDICES = {
         'tick_size': 0.01,
         'tick_value': 0.01,
         'currency': 'EUR',
-        'point_value': 1.0,
+        'point_value': 11.80,       # $ per point per lot (10 EUR × ~1.18 EURUSD, verified MT5)
         'sl_buffer': 5.0,           # Buffer for ~24000 index (matched to backtest)
         'min_sl_distance': 10.0,
-        'max_sl_distance': 200.0,
+        'max_sl_distance': 80.0,    # Max SL distance (aligned with backtest)
         
         # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
         'orb_minutes': 15,
-        'entry_hours': 2,
+        'entry_hours': 3,
         'breakout_window_minutes': 60,
         'disp_mult': 1.0,
         'body_min': 0.70,
@@ -176,7 +177,7 @@ PROFITABLE_INDICES = {
         'breakout_margin': 0.15,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
-        'max_sl_points': 200.0,
+        'max_sl_points': 80.0,
         
         'market_open_hour': 9,
         'market_open_minute': 0,
@@ -194,8 +195,46 @@ PROFITABLE_INDICES = {
         'timezone': 'Europe/Berlin',
     },
     
-    # FRA40 removed - not backtested with ORB strategy
-    # 'FRA40': { ... },
+    'FRA40': {
+        'symbol': 'FRA40',
+        'description': 'CAC 40 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'EUR',
+        'point_value': 10.0,        # $ per point per lot (10 EUR × ~1.0 — backtest-validated)
+        'sl_buffer': 1.0,           # Aligned with backtest
+        'min_sl_distance': 2.0,
+        'max_sl_distance': 30.0,    # Max SL distance (aligned with backtest)
+        
+        # ORB strategy params — FRA40 custom (backtest-validated, combined PF 1.54)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.5,
+        'body_min': 0.60,
+        'close_strength': 0.30,
+        'breakout_margin': 0.10,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 2.0,
+        'max_sl_points': 30.0,
+        
+        # Trading Hours — Euronext Paris 9:00-17:30 CET
+        'market_open_hour': 9,
+        'market_open_minute': 0,
+        'market_close_hour': 17,
+        'market_close_minute': 30,
+        'force_close_hour': 17,
+        'force_close_minute': 15,
+        
+        # MT5 Time (EET — Paris 9:00-17:30 CET = 10:00-18:30 EET)
+        'mt5_open_hour': 10,
+        'mt5_open_minute': 0,
+        'mt5_close_hour': 18,
+        'mt5_close_minute': 30,
+        
+        'timezone': 'Europe/Paris',
+    },
     
     # HK50 removed - negative P&L after costs in 1-year backtest (-$4,018)
     # 'HK50': { ... },
@@ -207,14 +246,14 @@ PROFITABLE_INDICES = {
         'tick_size': 0.01,
         'tick_value': 0.01,
         'currency': 'USD',
-        'point_value': 1.0,
+        'point_value': 10.0,        # $ per point per lot (verified via MT5 order_calc_profit)
         'sl_buffer': 5.0,
         'min_sl_distance': 10.0,
-        'max_sl_distance': 200.0,
+        'max_sl_distance': 80.0,    # Max SL distance (aligned with backtest)
         
         # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
         'orb_minutes': 15,
-        'entry_hours': 2,
+        'entry_hours': 3,
         'breakout_window_minutes': 60,
         'disp_mult': 1.0,
         'body_min': 0.70,
@@ -222,7 +261,7 @@ PROFITABLE_INDICES = {
         'breakout_margin': 0.15,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
-        'max_sl_points': 200.0,
+        'max_sl_points': 80.0,
         
         'market_open_hour': 9,
         'market_open_minute': 30,
@@ -247,22 +286,22 @@ PROFITABLE_INDICES = {
         'tick_size': 0.01,
         'tick_value': 0.01,
         'currency': 'USD',
-        'point_value': 1.0,
+        'point_value': 10.0,        # $ per point per lot (verified via MT5 order_calc_profit)
         'sl_buffer': 5.0,           # Dow has larger point movements
-        'min_sl_distance': 10.0,
-        'max_sl_distance': 200.0,
+        'min_sl_distance': 15.0,    # Aligned with backtest
+        'max_sl_distance': 150.0,   # Aligned with backtest
         
-        # ORB strategy params (Candidate #12 — optimized for frequency)
+        # ORB strategy params — Universal (anti-curve-fit, aligned with backtest)
         'orb_minutes': 15,
-        'entry_hours': 2,
+        'entry_hours': 3,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.3,
-        'body_min': 0.60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
         'close_strength': 0.25,
-        'breakout_margin': 0.05,
+        'breakout_margin': 0.15,
         'orb_range_min_mult': 0.5,
-        'min_sl_points': 10.0,
-        'max_sl_points': 200.0,
+        'min_sl_points': 15.0,
+        'max_sl_points': 150.0,
         
         'market_open_hour': 9,
         'market_open_minute': 30,
@@ -291,14 +330,14 @@ PROFITABLE_INDICES = {
         'tick_size': 0.1,            # MT5 actual: digits=1, tick_size=0.1
         'tick_value': 0.1,           # MT5 actual: tick_value=0.1 USD
         'currency': 'USD',
-        'point_value': 1.0,         # $ per point per lot (fallback; live uses broker data)
+        'point_value': 10.0,        # $ per point per lot (verified via MT5 order_calc_profit)
         'sl_buffer': 1.0,
         'min_sl_distance': 2.0,
         'max_sl_distance': 100.0,
         
         # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
         'orb_minutes': 15,
-        'entry_hours': 2,
+        'entry_hours': 3,
         'breakout_window_minutes': 60,
         'disp_mult': 1.0,
         'body_min': 0.70,
