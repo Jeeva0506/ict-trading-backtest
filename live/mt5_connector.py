@@ -233,6 +233,9 @@ class MT5Connector:
 
         self.connected = True
         info = mt5.account_info()
+        if not info:
+            logger.error("MT5 account_info() returned None after login")
+            return False
         logger.info(f"Connected to MT5 - Account: {info.login}, Balance: ${info.balance:,.2f}")
         return True
 
@@ -983,7 +986,7 @@ class LiveTrader:
     def _get_session_name(self, symbol: str) -> str:
         """Map symbol to trading session name for edge diagnostics."""
         us_symbols = {'SPX500', 'NDX100', 'US30', 'US2000'}
-        eu_symbols = {'GER30'}
+        eu_symbols = {'GER30', 'FRA40'}
         if symbol in us_symbols:
             return "US"
         elif symbol in eu_symbols:
@@ -1128,7 +1131,10 @@ class LiveTrader:
             if self.mt5.connect():
                 logger.info("MT5 reconnected")
                 self.telegram.send_message("MT5 reconnected after dropout")
-                self._verify_positions_after_reconnect()
+                try:
+                    self._verify_positions_after_reconnect()
+                except Exception as e:
+                    logger.error(f"Position verification after reconnect failed: {e}")
                 return True
             time.sleep(5 * (attempt + 1))
 
@@ -1446,11 +1452,15 @@ class LiveTrader:
         if len(existing) >= 1:
             return False, "position already open"
         # News filter (Forex Factory high-impact only, 5min before / 15min after)
-        is_news, event = self.news_filter.is_news_time(symbol)
+        try:
+            is_news, event = self.news_filter.is_news_time(symbol)
+        except Exception as e:
+            logger.error(f"News filter error for {symbol}: {e}")
+            is_news, event = False, {}
         if is_news:
-            mins = event['minutes_away']
+            mins = event.get('minutes_away', 0)
             label = f"in {mins:.0f}m" if mins > 0 else f"{abs(mins):.0f}m ago"
-            logger.info(f"{symbol}: News blocked - {event['title']} {label}")
+            logger.info(f"{symbol}: News blocked - {event.get('title', 'Unknown')} {label}")
             # Telegram notification — max once per event per symbol (throttle 10 min)
             last_notify = self._block_notify_sent.get(symbol)
             if last_notify is None or (datetime.now() - last_notify).total_seconds() > 600:
@@ -1757,17 +1767,20 @@ class LiveTrader:
         if ticket in self.tracked_positions:
             self.tracked_positions[ticket]["journal_trade_id"] = trade_id
 
-        self.telegram.trade_entry(
-            symbol=symbol,
-            direction=order_type.upper(),
-            entry_price=fill_price,
-            sl=sig["stop_loss"],
-            tp1=sig["tp"],
-            tp2=sig["tp"],
-            tp3=sig["tp"],
-            lot_size=lots,
-            risk_amount=actual_risk_amount,
-        )
+        try:
+            self.telegram.trade_entry(
+                symbol=symbol,
+                direction=order_type.upper(),
+                entry_price=fill_price,
+                sl=sig["stop_loss"],
+                tp1=sig["tp"],
+                tp2=sig["tp"],
+                tp3=sig["tp"],
+                lot_size=lots,
+                risk_amount=actual_risk_amount,
+            )
+        except Exception as e:
+            logger.error(f"Telegram trade_entry notification failed: {e}")
 
         logger.info(f"TRADE: {order_type.upper()} {lots} {symbol} @ {fill_price} | "
                      f"SL: {sig['stop_loss']} | TP: {sig['tp']} | "
@@ -1944,9 +1957,9 @@ class LiveTrader:
                 continue
 
             pos = mt5_tickets[ticket]
-            direction = info["direction"]
-            entry = info["entry"]
-            R = info["R"]
+            direction = info.get("direction", "")
+            entry = info.get("entry", 0)
+            R = info.get("R", 0) or 0  # guard against None from corrupted state
             current_sl = pos["sl"]
 
             # Current price
@@ -1996,19 +2009,23 @@ class LiveTrader:
                 except Exception as tz_err:
                     # C7 FIX: Fallback uses auto-detected broker offset
                     logger.warning(f"Timezone fallback for {symbol}: {tz_err}")
-                    from datetime import timezone as _fctz, timedelta as _fctd
-                    _fc_offset = self._get_broker_utc_offset()
-                    _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
-                    local_now = utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
-                    now_min = local_now.hour * 60 + local_now.minute
-                    # C7 FIX: Use mt5_ hours (already in server time)
-                    force_h = config["mt5_close_hour"]
-                    force_m = config["mt5_close_minute"]
-                    force_min = (force_h * 60 + force_m) - 15
-                    close_min = force_h * 60 + force_m
+                    try:
+                        from datetime import timezone as _fctz, timedelta as _fctd
+                        _fc_offset = self._get_broker_utc_offset()
+                        _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
+                        _fc_utc_now = datetime.now(pytz.UTC)
+                        local_now = _fc_utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
+                        now_min = local_now.hour * 60 + local_now.minute
+                        # C7 FIX: Use mt5_ hours (already in server time)
+                        force_h = config.get("mt5_close_hour", 23)
+                        force_m = config.get("mt5_close_minute", 0)
+                        force_min = (force_h * 60 + force_m) - 15
+                        close_min = force_h * 60 + force_m
 
-                    if force_min <= now_min < close_min:
-                        force_close_triggered = True
+                        if force_min <= now_min < close_min:
+                            force_close_triggered = True
+                    except Exception as fb_err:
+                        logger.error(f"Force-close fallback also failed for {symbol}: {fb_err}")
 
                 # F1+F3 FIX: Single force-close path, use deal history for accurate PnL
                 if force_close_triggered:
@@ -2098,6 +2115,14 @@ class LiveTrader:
                         self.telegram.critical_alert("SL DISAPPEARED",
                                                      f"Emergency close {symbol} #{ticket}")
                         closed_tickets.append(ticket)
+                else:
+                    # No SL on record — emergency close to protect account
+                    logger.critical(f"Position {ticket} ({symbol}) has NO SL and no sl_init! "
+                                    f"Emergency closing.")
+                    self.mt5.close_position(ticket)
+                    self.telegram.critical_alert("NO SL ON RECORD",
+                                                 f"Emergency close {symbol} #{ticket} — sl_init=0")
+                    closed_tickets.append(ticket)
                 continue
 
             # ── BE trigger (at 1R profit) ──────────────────────────────
@@ -2152,6 +2177,7 @@ class LiveTrader:
         """Schedule a background thread to re-query deal history after 10s.
         If successful, updates the trade journal and daily P&L with the real values."""
         def _requery():
+          try:
             time.sleep(10)  # give MT5 time to register the deal
             pos_id = info.get("position_id", ticket)
             details = self._get_closed_trade_details(pos_id, expected_symbol=symbol)
@@ -2208,6 +2234,8 @@ class LiveTrader:
                     f"{symbol} ticket {ticket}\n"
                     f"Deal history unavailable. Check MT5 manually."
                 )
+          except Exception as e:
+            logger.error(f"Deferred PnL re-query thread failed for {ticket} ({symbol}): {e}")
 
         t = threading.Thread(target=_requery, daemon=True, name=f"pnl_requery_{ticket}")
         t.start()
@@ -2305,7 +2333,9 @@ class LiveTrader:
                     return pv
                 # Fallback: tick_value / tick_size (may miss contract_size)
                 if info.trade_tick_size > 0:
-                    return info.trade_tick_value / info.trade_tick_size
+                    tv = info.trade_tick_value / info.trade_tick_size
+                    if tv > 0:
+                        return tv
         except Exception:
             pass
         return 1.0

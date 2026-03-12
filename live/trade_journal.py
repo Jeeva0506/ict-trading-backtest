@@ -16,6 +16,10 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 
 logger = logging.getLogger(__name__)
 
+# Max retries for Excel file I/O (OneDrive lock, antivirus scan, etc.)
+_SAVE_RETRIES = 3
+_SAVE_RETRY_DELAY = 1.0  # seconds
+
 
 class TradeJournal:
     """Manages trade journal in Excel with dashboard"""
@@ -33,6 +37,39 @@ class TradeJournal:
             self._create_journal()
         else:
             self._migrate_schema()
+
+    # ── Safe I/O helpers (OneDrive / antivirus lock protection) ─────
+    def _safe_load(self) -> 'Workbook':
+        """Load workbook with retry on PermissionError / corrupt file."""
+        import time as _time
+        last_err = None
+        for attempt in range(_SAVE_RETRIES):
+            try:
+                return load_workbook(self.journal_path)
+            except PermissionError as e:
+                last_err = e
+                logger.warning(f"Journal file locked (attempt {attempt+1}/{_SAVE_RETRIES}): {e}")
+                _time.sleep(_SAVE_RETRY_DELAY)
+            except Exception as e:
+                last_err = e
+                logger.error(f"Journal load failed: {e}")
+                _time.sleep(_SAVE_RETRY_DELAY)
+        raise last_err  # re-raise after all retries exhausted
+
+    def _safe_save(self, wb: 'Workbook'):
+        """Save workbook with retry on PermissionError."""
+        import time as _time
+        for attempt in range(_SAVE_RETRIES):
+            try:
+                wb.save(self.journal_path)
+                return
+            except PermissionError as e:
+                logger.warning(f"Journal save locked (attempt {attempt+1}/{_SAVE_RETRIES}): {e}")
+                _time.sleep(_SAVE_RETRY_DELAY)
+            except Exception as e:
+                logger.error(f"Journal save failed: {e}")
+                _time.sleep(_SAVE_RETRY_DELAY)
+        logger.critical(f"Journal save FAILED after {_SAVE_RETRIES} retries — data may be lost!")
     
     def _migrate_schema(self):
         """Upgrade existing journal to new schema if needed."""
@@ -187,7 +224,7 @@ class TradeJournal:
     
     def add_trade(self, trade_data: Dict) -> int:
         """Add a new trade entry, returns trade ID"""
-        wb = load_workbook(self.journal_path)
+        wb = self._safe_load()
         ws = wb["Trades"]
         
         # Generate trade ID
@@ -268,13 +305,13 @@ class TradeJournal:
             unfavorable = (slip_pts > 0 and direction == 'buy') or (slip_pts < 0 and direction == 'sell')
             ws.cell(row=last_row, column=8).fill = fill_bad if unfavorable else fill_ok
 
-        wb.save(self.journal_path)
+        self._safe_save(wb)
         logger.info(f"Trade {trade_id} added to journal (slippage: {slip_pts:+.2f} pts / ${slip_dollars:.2f})")
         return trade_id
     
     def close_trade(self, trade_id: int, exit_data: Dict):
         """Update trade with exit information including MFE/MAE, actual RR, etc."""
-        wb = load_workbook(self.journal_path)
+        wb = self._safe_load()
         ws = wb["Trades"]
         
         # Find the trade row
@@ -341,7 +378,7 @@ class TradeJournal:
                 
                 break
         
-        wb.save(self.journal_path)
+        self._safe_save(wb)
         logger.info(f"Trade {trade_id} closed in journal (P&L: ${exit_data.get('pnl', 0):+.2f}, RR: {actual_rr})")
     
     def get_daily_stats(self, date: str = None) -> Dict:
@@ -349,7 +386,7 @@ class TradeJournal:
         if date is None:
             date = datetime.now().strftime("%Y-%m-%d")
         
-        wb = load_workbook(self.journal_path)
+        wb = self._safe_load()
         ws = wb["Trades"]
         
         trades = []
@@ -414,7 +451,7 @@ class TradeJournal:
         start_date = datetime.strptime(week_start, "%Y-%m-%d")
         end_date = start_date + timedelta(days=6)
         
-        wb = load_workbook(self.journal_path)
+        wb = self._safe_load()
         ws = wb["Trades"]
         
         trades = []
@@ -477,7 +514,7 @@ class TradeJournal:
         """Update or add daily summary row"""
         stats = self.get_daily_stats(date)
         
-        wb = load_workbook(self.journal_path)
+        wb = self._safe_load()
         ws = wb["Daily Summary"]
         
         # Check if date exists
@@ -517,11 +554,11 @@ class TradeJournal:
         elif pnl_value and pnl_value < 0:
             ws.cell(row=last_row, column=pnl_col).fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
-        wb.save(self.journal_path)
+        self._safe_save(wb)
     
     def update_dashboard(self, balance: float, initial_balance: float = 100000):
         """Update dashboard with latest stats"""
-        wb = load_workbook(self.journal_path)
+        wb = self._safe_load()
         ws = wb["Dashboard"]
         
         # Clear old content (except title)
@@ -611,7 +648,7 @@ class TradeJournal:
         ws["A25"] = f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         ws["A25"].font = Font(italic=True, color="666666")
         
-        wb.save(self.journal_path)
+        self._safe_save(wb)
         logger.info("Dashboard updated")
 
 

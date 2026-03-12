@@ -1021,7 +1021,7 @@ def monitor_mt5_connection() -> None:
                                     f"Symbol: {position.symbol}\n"
                                     f"Last tick: {time_since_tick:.0f} seconds ago"
                                 )
-                    except:
+                    except Exception:
                         pass
             
             time.sleep(CONNECTION_MONITOR_INTERVAL)
