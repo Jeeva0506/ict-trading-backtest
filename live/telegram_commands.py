@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any
@@ -701,7 +702,13 @@ Use /resume to continue trading.
         return bar_char * filled + "⬜" * empty + f" ({ratio*100:.0f}%)"
     
     def start_polling(self):
-        """Start the polling thread to listen for commands"""
+        """Start the polling thread to listen for commands.
+        
+        Uses a file-based lock to ensure only ONE process polls the bot token
+        at a time. When two accounts share the same bot token, only the first
+        process to acquire the lock will poll. The other process becomes
+        notification-only (can still SEND messages, just won't process commands).
+        """
         if not self.enabled:
             logger.warning("Cannot start polling - Telegram not configured")
             return
@@ -710,16 +717,55 @@ Use /resume to continue trading.
             logger.warning("Polling already running")
             return
         
+        # ── Multi-instance polling lock ──────────────────────────────
+        # Prevent two processes from consuming the same getUpdates feed.
+        # Lock file lives in a SHARED location (not per-account).
+        self._poll_lock_file = Path(__file__).parent / 'logs' / 'telegram_poll.lock'
+        self._poll_lock_file.parent.mkdir(parents=True, exist_ok=True)
+        self._owns_poll_lock = False
+        
+        try:
+            if self._poll_lock_file.exists():
+                import psutil
+                try:
+                    old_pid = int(self._poll_lock_file.read_text().strip())
+                    if psutil.pid_exists(old_pid):
+                        proc = psutil.Process(old_pid)
+                        if 'python' in proc.name().lower():
+                            logger.info(f"Telegram polling lock held by PID {old_pid} — "
+                                        f"this instance is NOTIFICATION-ONLY (no commands)")
+                            return  # Another process is polling — skip
+                except (ValueError, psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass  # Stale lock — overwrite
+            
+            # Acquire lock
+            self._poll_lock_file.write_text(str(os.getpid()))
+            self._owns_poll_lock = True
+            logger.info(f"Telegram polling lock acquired (PID {os.getpid()})")
+        except Exception as e:
+            logger.warning(f"Could not check/acquire polling lock: {e}")
+            # If we can't check, proceed with polling (single-instance fallback)
+            self._owns_poll_lock = True
+        
         self.running = True
         self.polling_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self.polling_thread.start()
         logger.info("Telegram command polling started")
     
     def stop_polling(self):
-        """Stop the polling thread"""
+        """Stop the polling thread and release lock"""
         self.running = False
         if self.polling_thread:
             self.polling_thread.join(timeout=5)
+        # Release polling lock
+        if getattr(self, '_owns_poll_lock', False):
+            try:
+                lock = getattr(self, '_poll_lock_file', None)
+                if lock and lock.exists():
+                    lock.unlink(missing_ok=True)
+                    logger.info("Telegram polling lock released")
+            except Exception:
+                pass
         logger.info("Telegram command polling stopped")
     
     def _poll_loop(self):

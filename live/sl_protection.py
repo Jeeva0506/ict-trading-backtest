@@ -61,6 +61,15 @@ _current_risk_pct = RISK_PER_TRADE  # C3 FIX: mutable risk that tracks adaptive 
 FAILED_CLOSE_REMINDER_INTERVAL = 120  # remind every 2 minutes for failed closes
 
 
+def _get_bot_magic() -> int:
+    """Return BOT_MAGIC aligned with mt5_connector (20260000 + login % 10000)."""
+    try:
+        from config_fundednext import MT5_LOGIN
+        return 20260000 + (MT5_LOGIN % 10000)
+    except Exception:
+        return 20260218  # legacy fallback
+
+
 def update_risk_percent(risk_pct_decimal: float) -> None:
     """C3 FIX: Called by LiveTrader whenever adaptive risk changes."""
     global _current_risk_pct
@@ -535,7 +544,7 @@ def emergency_close_position(ticket: int, reason: str) -> bool:
             "position": ticket,
             "price": price,
             "deviation": ORDER_DEVIATION_POINTS,
-            "magic": 20260218,
+            "magic": _get_bot_magic(),
             "comment": f"Emergency: {reason[:30]}",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
@@ -937,20 +946,37 @@ def reconnect_mt5() -> bool:
             mt5.shutdown()
             time.sleep(2)
             
-            if mt5.initialize():
-                # C6 FIX: Re-login to account after reinitializing MT5
-                try:
-                    from config_fundednext import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
-                    if MT5_LOGIN and MT5_PASSWORD:
-                        login_ok = mt5.login(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
-                        if not login_ok:
-                            if logger:
-                                logger.warning(f"MT5 re-login failed: {mt5.last_error()}")
-                            continue
+            # FIX B1: Pass path + timeout to bind to the correct terminal
+            # in multi-instance setups. Never pass credentials to initialize()
+            # to avoid triggering "account changed" in MT5.
+            try:
+                from config_fundednext import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
+            except ImportError:
+                MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH = 0, '', '', ''
+            
+            init_kwargs = {'timeout': 30000}
+            if MT5_PATH:
+                init_kwargs['path'] = MT5_PATH
+            
+            if mt5.initialize(**init_kwargs):
+                # Check if already logged into the right account
+                info = mt5.account_info()
+                if info and info.login == MT5_LOGIN:
+                    if logger:
+                        logger.info(f"MT5 reconnected (already logged in as {MT5_LOGIN})")
+                    send_telegram_alert("[OK] MT5 reconnected successfully")
+                    return True
+                
+                # Need to login
+                if MT5_LOGIN and MT5_PASSWORD:
+                    login_ok = mt5.login(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
+                    if not login_ok:
                         if logger:
-                            logger.info(f"MT5 re-logged into account {MT5_LOGIN}")
-                except ImportError:
-                    pass  # Config not available, rely on auto-login
+                            logger.warning(f"MT5 re-login failed: {mt5.last_error()}")
+                        continue
+                    if logger:
+                        logger.info(f"MT5 re-logged into account {MT5_LOGIN}")
+                
                 if logger:
                     logger.info("MT5 reconnected successfully")
                 send_telegram_alert("[OK] MT5 reconnected successfully")
@@ -1102,11 +1128,10 @@ def stop_monitoring() -> None:
 # MODULE INITIALIZATION
 # ============================================================================
 
-# Auto-setup logging when module is imported (uses default path)
-# In multi-account mode, start_monitoring(log_dir=...) will re-initialize
-# with the correct path before threads start.
-if logger is None:
-    setup_logging()
+# FIX B9: Do NOT auto-setup logging here — it creates a non-namespaced log file
+# that both accounts write to. Let start_monitoring(log_dir=...) handle it.
+# The logger will be None until start_monitoring() is called, which is fine
+# because no logging happens until monitoring starts.
 
 
 # ============================================================================

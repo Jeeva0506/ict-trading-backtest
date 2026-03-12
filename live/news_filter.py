@@ -43,6 +43,7 @@ class EconomicCalendar:
     def __init__(self, buffer_before_minutes: int = 5,
                  buffer_after_minutes: int = 15,
                  cache_minutes: int = 15,
+                 cache_dir: Path = None,
                  # Legacy kwarg kept so existing callers don't break
                  buffer_minutes: int = None):
         # New asymmetric buffers: 5 min before, 15 min after
@@ -51,7 +52,11 @@ class EconomicCalendar:
         self.cache_minutes = cache_minutes
         self.cache = []
         self.last_fetch = None
-        self.cache_file = Path(__file__).parent / 'logs' / 'news_cache.json'
+        # FIX B8: Use namespaced cache dir to avoid write race between accounts
+        if cache_dir:
+            self.cache_file = Path(cache_dir) / 'news_cache.json'
+        else:
+            self.cache_file = Path(__file__).parent / 'logs' / 'news_cache.json'
         # C4 FIX: Load cached news from disk on startup (survives restarts + API downtime)
         self._load_cache_from_disk()
 
@@ -115,14 +120,16 @@ class EconomicCalendar:
             self.cache = events
             self.last_fetch = datetime.now()
 
-            # Save to file
+            # Save to file (atomic: write to temp, then rename)
             try:
                 self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.cache_file, 'w') as f:
+                tmp = self.cache_file.with_suffix('.tmp')
+                with open(tmp, 'w') as f:
                     json.dump({
                         'fetch_time': str(self.last_fetch),
                         'events': events
                     }, f)
+                tmp.replace(self.cache_file)
             except Exception:
                 pass
 

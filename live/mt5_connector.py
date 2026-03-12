@@ -215,21 +215,25 @@ class MT5Connector:
 
     # ── connect ─────────────────────────────────────────────────────────
     def connect(self) -> bool:
-        # Use account-specific MT5 terminal path if configured
-        init_kwargs = {}
+        # STEP 1: initialize() with path ONLY — binds to the correct terminal
+        # WITHOUT switching accounts (avoids "algo trading disabled because
+        # account has been changed" in multi-instance setups).
+        init_kwargs = {'timeout': 30000}  # 30s timeout for IPC
         if MT5_PATH:
             init_kwargs['path'] = MT5_PATH
+
         if not mt5.initialize(**init_kwargs):
             logger.error(f"MT5 init failed: {mt5.last_error()}")
             return False
 
+        # STEP 2: check if already logged into the correct account
         info = mt5.account_info()
         if info and info.login == MT5_LOGIN:
-            logger.info(f"Already logged in to account {MT5_LOGIN}")
             self.connected = True
             logger.info(f"Connected to MT5 - Account: {info.login}, Balance: ${info.balance:,.2f}")
             return True
 
+        # STEP 3: not logged in (or wrong account) — do login ONCE
         if MT5_LOGIN and MT5_PASSWORD:
             ok = mt5.login(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
             if not ok:
@@ -574,6 +578,7 @@ class LiveTrader:
         self.news_filter = EconomicCalendar(
             buffer_before_minutes=5,   # block 5 min before high-impact news
             buffer_after_minutes=15,   # block 15 min after high-impact news
+            cache_dir=_log_dir,        # FIX B8: per-account news cache
         )
         self.dd_protection: Optional[DrawdownProtection] = None
         self.state = TradingState()

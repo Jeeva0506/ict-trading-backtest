@@ -367,12 +367,22 @@ class TradingWatchdog:
             return {'cpu_percent': 0, 'memory_percent': 0, 'memory_available_gb': 0, 'disk_percent': 0}
     
     def check_mt5_process(self) -> bool:
-        """Check if MetaTrader 5 terminal is running"""
+        """Check if THIS account's MetaTrader 5 terminal is running.
+        FIX B5: Filter by executable path when MT5_PATH is configured,
+        so each watchdog monitors only its own terminal instance."""
         try:
-            for proc in psutil.process_iter(['name']):
+            target_path = self._mt5_path_cache
+            for proc in psutil.process_iter(['name', 'exe']):
                 name = proc.info['name']
                 if name and 'terminal64' in name.lower():
-                    return True
+                    if target_path:
+                        # Multi-instance: match exact executable path
+                        exe = proc.info.get('exe', '')
+                        if exe and Path(exe).resolve() == Path(str(target_path)).resolve():
+                            return True
+                    else:
+                        # Single instance: any terminal64 counts
+                        return True
             return False
         except Exception as e:
             logger.error(f"Error checking MT5 process: {e}")
