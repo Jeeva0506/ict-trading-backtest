@@ -46,9 +46,10 @@ class TelegramNotifier:
             logger.warning("Telegram notifications disabled - missing token or chat_id")
     
     def _tag(self, message: str) -> str:
-        """Prepend account label to message if set."""
+        """Add prominent account header bar to message for shared Telegram chat."""
         if self.account_label:
-            return f"[{self.account_label}] {message}"
+            header = f"━━ 💼 <b>{self.account_label}</b> ━━"
+            return f"{header}\n{message}"
         return message
     
     def send_message(self, message: str, parse_mode: str = "HTML") -> bool:

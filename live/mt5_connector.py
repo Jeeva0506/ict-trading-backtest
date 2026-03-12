@@ -80,6 +80,13 @@ _fh = logging.FileHandler(_log_dir / "trading.log", encoding="utf-8")
 _fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(_fh)
 
+# Separate detection logger — one file per account for ORB diagnostics
+_det_logger = logging.getLogger(f"Detection.{ACCOUNT_LABEL}")
+_det_logger.setLevel(logging.INFO)
+_det_fh = logging.FileHandler(_log_dir / "detection.log", encoding="utf-8")
+_det_fh.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+_det_logger.addHandler(_det_fh)
+
 if sys.platform == "win32":
     _cs = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 else:
@@ -1341,6 +1348,7 @@ class LiveTrader:
                     log_parts.append(entry_sig)
 
                 logger.info(" | ".join(log_parts))
+                _det_logger.info(" | ".join(log_parts))
                 self._detection_logged_today[symbol] = True
 
         if not signals:
@@ -1786,6 +1794,8 @@ class LiveTrader:
                      f"SL: {sig['stop_loss']} | TP: {sig['tp']} | "
                      f"sigR: {sig['risk_points']:.2f} | liveR: {live_risk_points:.2f} | "
                      f"risk: ${actual_risk_amount:.2f} ({actual_risk_amount/balance*100:.1f}%)")
+        _det_logger.info(f"{symbol}: FILLED {order_type.upper()} {lots} lots @ {fill_price} | "
+                         f"SL={sig['stop_loss']} TP={sig['tp']} risk=${actual_risk_amount:.2f}")
 
         # Record trade in session recap
         self._session_recap.setdefault(symbol, {}).update({
@@ -1860,6 +1870,8 @@ class LiveTrader:
                 self.state.daily_pnl += pnl
                 logger.info(f"Position {ticket} ({symbol}) closed: {exit_reason}, "
                             f"exit={exit_price}, PnL=${pnl:.2f}")
+                _det_logger.info(f"{symbol}: CLOSED {exit_reason} @ {exit_price} | "
+                                 f"PnL=${pnl:+.2f} | daily=${self.state.daily_pnl:+.2f}")
                 
                 # Journal close with MFE/MAE
                 pos_R = info.get("R", 0)
@@ -2563,6 +2575,11 @@ class LiveTrader:
                         logger.info(f"{symbol}: ORB signal detected - {sig['direction']} "
                                     f"entry={sig['entry_price']:.2f} "
                                     f"SL={sig['stop_loss']:.2f}")
+                        _det_logger.info(f"{symbol}: SIGNAL {sig['direction']} "
+                                         f"entry={sig['entry_price']:.2f} "
+                                         f"SL={sig['stop_loss']:.2f} "
+                                         f"TP={sig['tp']:.2f} "
+                                         f"R={sig['risk_points']:.2f}")
                         self._execute_signal(symbol, sig)
                     # else: no valid ORB breakout this cycle — silent, normal
 
