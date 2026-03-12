@@ -165,9 +165,12 @@ def send_telegram_alert(message: str) -> bool:
 # FUNCTION 3: setup_logging
 # ============================================================================
 
-def setup_logging() -> logging.Logger:
+def setup_logging(log_dir_override: Path = None) -> logging.Logger:
     """
     Configure logging to file and console.
+    
+    Args:
+        log_dir_override: Optional custom log directory (for multi-account isolation)
     
     Returns:
         Configured logger object
@@ -175,8 +178,8 @@ def setup_logging() -> logging.Logger:
     global logger
     
     # Create logs directory if needed
-    log_dir = Path(__file__).parent / 'logs'
-    log_dir.mkdir(exist_ok=True)
+    log_dir = log_dir_override if log_dir_override else Path(__file__).parent / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / 'sl_protection.log'
     
     # Create logger
@@ -1027,9 +1030,12 @@ def monitor_mt5_connection() -> None:
 # FUNCTION 14: start_monitoring
 # ============================================================================
 
-def start_monitoring() -> Tuple[threading.Thread, threading.Thread]:
+def start_monitoring(log_dir: Path = None) -> Tuple[threading.Thread, threading.Thread]:
     """
     Start all monitoring threads.
+    
+    Args:
+        log_dir: Optional log directory for multi-account isolation
     
     Returns:
         Tuple of (position_monitor_thread, connection_monitor_thread)
@@ -1038,7 +1044,7 @@ def start_monitoring() -> Tuple[threading.Thread, threading.Thread]:
     
     # Initialize if needed
     if logger is None:
-        setup_logging()
+        setup_logging(log_dir_override=log_dir)
     
     monitoring_active = True
     position_lock = threading.Lock()
@@ -1087,7 +1093,9 @@ def stop_monitoring() -> None:
 # MODULE INITIALIZATION
 # ============================================================================
 
-# Auto-setup logging when module is imported
+# Auto-setup logging when module is imported (uses default path)
+# In multi-account mode, start_monitoring(log_dir=...) will re-initialize
+# with the correct path before threads start.
 if logger is None:
     setup_logging()
 

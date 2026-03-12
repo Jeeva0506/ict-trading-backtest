@@ -40,7 +40,8 @@ class TelegramCommandHandler:
     Uses long-polling to receive updates from Telegram.
     """
     
-    def __init__(self, bot_token: str, chat_id: str, authorized_users: list = None):
+    def __init__(self, bot_token: str, chat_id: str, authorized_users: list = None,
+                 state_dir: Path = None, account_label: str = ""):
         """
         Initialize the command handler.
         
@@ -48,12 +49,15 @@ class TelegramCommandHandler:
             bot_token: Telegram bot token
             chat_id: Primary chat ID for notifications
             authorized_users: List of user IDs allowed to send commands (optional)
+            state_dir: Directory for state file (default: live/logs/)
+            account_label: Account label for multi-account identification
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.authorized_users = authorized_users or []
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         self.enabled = bool(bot_token and chat_id)
+        self.account_label = account_label
         
         # State
         self.running = False
@@ -82,8 +86,12 @@ class TelegramCommandHandler:
             'last_command_by': None
         }
         
-        # State file for persistence
-        self.state_file = Path(__file__).parent / 'logs' / 'telegram_state.json'
+        # State file for persistence (namespaced per account)
+        if state_dir:
+            self.state_file = state_dir / 'telegram_state.json'
+        else:
+            self.state_file = Path(__file__).parent / 'logs' / 'telegram_state.json'
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self._load_state()
         
         if not self.enabled:

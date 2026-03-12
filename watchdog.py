@@ -6,6 +6,10 @@ Also monitors system resources and MT5 process.
 
 Run this INSTEAD of run_live.py directly.
 
+Usage:
+    python watchdog.py                          # Default account
+    python watchdog.py --account stellar15k     # Stellar15k profile
+
 Edge cases handled:
 - Bot crash / unexpected exit → auto-restart with rate limiting
 - Bot freeze (no heartbeat) → force kill + restart
@@ -22,15 +26,36 @@ import os
 import sys
 import io
 import signal
+import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 
+# ── CRITICAL: parse --account BEFORE any config imports ──────────────
+_pre_parser = argparse.ArgumentParser(add_help=False)
+_pre_parser.add_argument('--account', type=str, default='',
+                         help='Account profile name (loads .env.<profile>)')
+_pre_args, _ = _pre_parser.parse_known_args()
+if _pre_args.account:
+    os.environ['ACCOUNT_PROFILE'] = _pre_args.account
+
+# Add path for imports
+sys.path.insert(0, str(Path(__file__).parent / 'live'))
+
+from config_fundednext import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                               HEARTBEAT_URL, HEARTBEAT_INTERVAL_SECONDS,
+                               PROFITABLE_INDICES, ACCOUNT_LABEL, MT5_PATH)
+from telegram_notifier import TelegramNotifier
+import requests as _requests
+import pytz
+
 # Setup logging with UTF-8 encoding for Windows Task Scheduler
-log_dir = Path(__file__).parent / 'live' / 'logs'
+# Namespace per account profile
+_label_slug = ACCOUNT_LABEL.lower().replace(' ', '_')
+log_dir = Path(__file__).parent / 'live' / 'logs' / _label_slug
 log_dir.mkdir(parents=True, exist_ok=True)
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(f"watchdog.{ACCOUNT_LABEL}")
 logger.setLevel(logging.INFO)
 
 # File handler
@@ -54,19 +79,9 @@ if _has_console:
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(console_handler)
 
-# Add path for imports
-sys.path.insert(0, str(Path(__file__).parent / 'live'))
-
-from config_fundednext import (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-                               HEARTBEAT_URL, HEARTBEAT_INTERVAL_SECONDS,
-                               PROFITABLE_INDICES)
-from telegram_notifier import TelegramNotifier
-import requests as _requests
-import pytz
-
-# Lock file to prevent multiple watchdog instances
-LOCK_FILE = Path(__file__).parent / 'live' / 'logs' / 'watchdog.lock'
-HEARTBEAT_FILE = Path(__file__).parent / 'live' / 'logs' / 'heartbeat.txt'
+# Lock file to prevent multiple watchdog instances (namespaced per account)
+LOCK_FILE = log_dir / 'watchdog.lock'
+HEARTBEAT_FILE = log_dir / 'heartbeat.txt'
 HEARTBEAT_STALE_SECONDS = 300  # 5 minutes without heartbeat = frozen
 
 # Buffer: start bot this many minutes before earliest market open,
@@ -173,13 +188,16 @@ class TradingWatchdog:
         else:
             self.python_path = Path(sys.executable)
         self.script_path = Path(__file__).parent / 'run_live.py'
+        # Build subprocess command — pass --account to run_live.py if set
+        self._account_profile = _pre_args.account
         self.process = None
         self.start_time = None
         self.restart_count = 0
         self.max_restarts_per_hour = 5
         self.restart_times = []
-        self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        self._mt5_path_cache = None  # Cache found MT5 path
+        self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                                         account_label=ACCOUNT_LABEL)
+        self._mt5_path_cache = MT5_PATH if MT5_PATH else None  # Use configured MT5 path
         self._stdout_file = None
         self._stderr_file = None
         self._last_heartbeat = 0  # epoch timestamp of last heartbeat ping
@@ -216,8 +234,12 @@ class TradingWatchdog:
             if sys.platform == 'win32':
                 _flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
             
+            cmd = [str(self.python_path), str(self.script_path)]
+            if self._account_profile:
+                cmd.extend(['--account', self._account_profile])
+            
             self.process = subprocess.Popen(
-                [str(self.python_path), str(self.script_path)],
+                cmd,
                 cwd=str(self.script_path.parent),
                 stdout=stdout_f,
                 stderr=stderr_f,

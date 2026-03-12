@@ -3,13 +3,13 @@ FundedNext ORB Trading Bot - Main Entry Point
 ==============================================
 Run this script to start the 24/7 trading bot
 
-Indices: SPX500, NDX100, GER30, US30, SWI20, US2000
 Strategy: Opening Range Breakout (15-min ORB)
 
 Usage:
-    python run_live.py              # Start live trading
-    python run_live.py --test       # Test mode (no real trades)
-    python run_live.py --status     # Check current status
+    python run_live.py                          # Start live trading (default account)
+    python run_live.py --account stellar15k     # Start live trading (stellar15k profile)
+    python run_live.py --test                   # Test mode (no real trades)
+    python run_live.py --status                 # Check current status
 """
 import sys
 import io
@@ -17,6 +17,15 @@ import os
 import argparse
 from pathlib import Path
 from datetime import datetime
+
+# ── CRITICAL: parse --account BEFORE any config imports ──────────────
+# config_fundednext reads ACCOUNT_PROFILE env var at import time.
+_pre_parser = argparse.ArgumentParser(add_help=False)
+_pre_parser.add_argument('--account', type=str, default='',
+                         help='Account profile name (loads .env.<profile>)')
+_pre_args, _ = _pre_parser.parse_known_args()
+if _pre_args.account:
+    os.environ['ACCOUNT_PROFILE'] = _pre_args.account
 
 # Fix Windows console encoding for Unicode characters
 # Under pythonw.exe stdout/stderr may be None — redirect to devnull
@@ -34,16 +43,18 @@ sys.path.insert(0, str(Path(__file__).parent / 'live'))  # live folder
 
 from live.mt5_connector import LiveTrader, MT5Connector, get_active_indices
 from live.news_filter import EconomicCalendar
-from config_fundednext import FUNDEDNEXT_RULES, PROFITABLE_INDICES
+from config_fundednext import FUNDEDNEXT_RULES, PROFITABLE_INDICES, ACCOUNT_LABEL
 
 
 def show_banner():
     """Display startup banner"""
-    print("""
+    indices_str = ' | '.join(PROFITABLE_INDICES.keys())
+    print(f"""
     +==============================================================+
     |         FUNDEDNEXT ORB TRADING BOT v2.2                     |
+    |         Account: {ACCOUNT_LABEL:<39s}|
     |         --------------------------------                    |
-    |    SPX500 | NDX100 | GER30 | US30 | SWI20 | US2000         |
+    |    {indices_str:<55s}|
     |         15-min ORB | Candidate #12 | 2.5R TP                |
     +==============================================================+
     """)
@@ -168,7 +179,8 @@ def run_test_mode():
 
 def _acquire_bot_lock():
     """Prevent duplicate bot instances. If another bot process is alive, exit."""
-    lock = Path(__file__).parent / 'live' / 'logs' / 'bot.lock'
+    _label = ACCOUNT_LABEL.lower().replace(' ', '_')
+    lock = Path(__file__).parent / 'live' / 'logs' / _label / 'bot.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
     if lock.exists():
         try:
@@ -214,6 +226,8 @@ def main():
     parser.add_argument('--test', action='store_true', help='Run in test mode')
     parser.add_argument('--status', action='store_true', help='Show current status')
     parser.add_argument('--config', action='store_true', help='Show configuration')
+    parser.add_argument('--account', type=str, default='',
+                        help='Account profile name (loads .env.<profile>)')
     
     args = parser.parse_args()
     

@@ -35,14 +35,21 @@ def ist_time(fmt: str = '%H:%M:%S IST') -> str:
 class TelegramNotifier:
     """Send trading notifications via Telegram"""
     
-    def __init__(self, bot_token: str, chat_id: str):
+    def __init__(self, bot_token: str, chat_id: str, account_label: str = ""):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         self.enabled = bool(bot_token and chat_id)
+        self.account_label = account_label  # e.g. "STELLAR-2" — prepended to messages
         
         if not self.enabled:
             logger.warning("Telegram notifications disabled - missing token or chat_id")
+    
+    def _tag(self, message: str) -> str:
+        """Prepend account label to message if set."""
+        if self.account_label:
+            return f"[{self.account_label}] {message}"
+        return message
     
     def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
         """Send a message to Telegram"""
@@ -53,7 +60,7 @@ class TelegramNotifier:
             url = f"{self.base_url}/sendMessage"
             payload = {
                 "chat_id": self.chat_id,
-                "text": message,
+                "text": self._tag(message),
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": True
             }

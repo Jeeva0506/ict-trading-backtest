@@ -14,9 +14,21 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-env_path = Path(__file__).parent.parent / '.env'
-load_dotenv(env_path)
+# ── Multi-account support ──────────────────────────────────────────────
+# Set ACCOUNT_PROFILE env var BEFORE importing this module to select profile.
+#   ACCOUNT_PROFILE=stellar15k  → loads .env.stellar15k
+#   ACCOUNT_PROFILE=  (default) → loads .env (original account)
+_profile = os.environ.get('ACCOUNT_PROFILE', '').strip()
+if _profile:
+    env_path = Path(__file__).parent.parent / f'.env.{_profile}'
+    if not env_path.exists():
+        raise FileNotFoundError(
+            f"Account profile '{_profile}' requested but {env_path} not found.\n"
+            f"Create the file or check the ACCOUNT_PROFILE env var."
+        )
+else:
+    env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(env_path, override=True)  # override=True so profile env beats any stale vars
 
 # ============================================================================
 # MT5 SERVER CREDENTIALS (from .env)
@@ -109,6 +121,16 @@ DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 # healthchecks.io sends YOU a Telegram alert — even if this laptop is dead.
 HEARTBEAT_URL = os.getenv('HEARTBEAT_URL', '')  # e.g. https://hc-ping.com/your-uuid-here
 HEARTBEAT_INTERVAL_SECONDS = 300  # Ping every 5 minutes
+
+# ============================================================================
+# MULTI-ACCOUNT SETTINGS (from .env)
+# ============================================================================
+ACCOUNT_LABEL = os.getenv('ACCOUNT_LABEL', 'DEFAULT')
+MT5_PATH = os.getenv('MT5_PATH', '')           # path to terminal64.exe (empty = default)
+# Comma-separated list of symbols to EXCLUDE from this account
+# e.g. EXCLUDE_INDICES=US2000,FRA40
+_EXCLUDE_RAW = os.getenv('EXCLUDE_INDICES', '')
+EXCLUDE_INDICES = [s.strip().upper() for s in _EXCLUDE_RAW.split(',') if s.strip()]
 
 # ============================================================================
 # PROFITABLE INDICES ONLY - With correct MT5 specifications
@@ -364,6 +386,18 @@ PROFITABLE_INDICES = {
         'timezone': 'America/New_York',
     },
 }
+
+# ── Apply per-account exclusions ────────────────────────────────────────
+if EXCLUDE_INDICES:
+    for _sym in EXCLUDE_INDICES:
+        if _sym in PROFITABLE_INDICES:
+            del PROFITABLE_INDICES[_sym]
+    # Log at import time so it's visible in the startup log
+    import logging as _logging
+    _logging.getLogger("config").info(
+        f"[{ACCOUNT_LABEL}] Excluded indices: {EXCLUDE_INDICES} "
+        f"→ active: {list(PROFITABLE_INDICES.keys())}"
+    )
 
 # ============================================================================
 # HIGH IMPACT NEWS EVENTS TO AVOID

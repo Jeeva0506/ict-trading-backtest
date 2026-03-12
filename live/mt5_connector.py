@@ -48,6 +48,8 @@ from config_fundednext import (
     ACCOUNT_SIZE,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    ACCOUNT_LABEL,
+    MT5_PATH,
 )
 from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
@@ -66,11 +68,12 @@ from sl_protection import (
 from news_filter import EconomicCalendar
 from edge_guard import EdgeGuard
 
-# ── logging ─────────────────────────────────────────────────────────────
-logger = logging.getLogger("LiveTrader")
+# ── logging (namespaced per account profile) ───────────────────────────
+logger = logging.getLogger(f"LiveTrader.{ACCOUNT_LABEL}")
 logger.setLevel(logging.INFO)
 
-_log_dir = Path(__file__).parent / "logs"
+# Namespace log directory: live/logs/<account_label>/
+_log_dir = Path(__file__).parent / "logs" / ACCOUNT_LABEL.lower().replace(' ', '_')
 _log_dir.mkdir(parents=True, exist_ok=True)
 
 _fh = logging.FileHandler(_log_dir / "trading.log", encoding="utf-8")
@@ -85,8 +88,9 @@ _ch = logging.StreamHandler(_cs)
 _ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(_ch)
 
-# ── magic number for all bot orders ─────────────────────────────────────
-BOT_MAGIC = 20260218
+# ── magic number for all bot orders (unique per account) ────────────────
+# Derive from login to guarantee different accounts get different magic numbers
+BOT_MAGIC = 20260000 + (MT5_LOGIN % 10000)
 
 
 # ============================================================================
@@ -185,7 +189,11 @@ class MT5Connector:
 
     # ── connect ─────────────────────────────────────────────────────────
     def connect(self) -> bool:
-        if not mt5.initialize():
+        # Use account-specific MT5 terminal path if configured
+        init_kwargs = {}
+        if MT5_PATH:
+            init_kwargs['path'] = MT5_PATH
+        if not mt5.initialize(**init_kwargs):
             logger.error(f"MT5 init failed: {mt5.last_error()}")
             return False
 
@@ -529,8 +537,8 @@ class LiveTrader:
       - Slippage logging    -> compare expected vs fill price on every order
     """
 
-    STATE_FILE = Path(__file__).parent / "logs" / "position_state.json"
-    HEARTBEAT_FILE = Path(__file__).parent / "logs" / "heartbeat.txt"
+    STATE_FILE = _log_dir / "position_state.json"
+    HEARTBEAT_FILE = _log_dir / "heartbeat.txt"
 
     def __init__(self):
         self.mt5 = MT5Connector()
@@ -541,9 +549,12 @@ class LiveTrader:
         self.dd_protection: Optional[DrawdownProtection] = None
         self.state = TradingState()
         self.strategies: Dict[str, StrategyICTClean] = {}
-        self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        self.journal = TradeJournal()
-        self.edge_guard = EdgeGuard(initial_balance=ACCOUNT_SIZE)
+        self.telegram = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                                          account_label=ACCOUNT_LABEL)
+        self.journal = TradeJournal(
+            journal_path=str(_log_dir.parent.parent / "reports" / f"trade_journal_{ACCOUNT_LABEL.lower().replace(' ', '_')}.xlsx")
+        )
+        self.edge_guard = EdgeGuard(data_dir=_log_dir, initial_balance=ACCOUNT_SIZE)
         self.report_scheduler = ReportScheduler(self.journal, self.telegram)
 
         # position tracking:  ticket -> {symbol, direction, entry, sl_init, tp, R,
@@ -573,7 +584,10 @@ class LiveTrader:
         self._trading_paused = False
 
         # Telegram command handler
-        self.cmd_handler = TelegramCommandHandler(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        self.cmd_handler = TelegramCommandHandler(
+            TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+            state_dir=_log_dir, account_label=ACCOUNT_LABEL,
+        )
         self._setup_command_callbacks()
 
         # market-open notification tracking
@@ -1002,7 +1016,7 @@ class LiveTrader:
 
         # Start subsystems
         sl_set_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        sl_start_monitoring()
+        sl_start_monitoring(log_dir=_log_dir)
         logger.info("SL Protection monitoring started")
 
         self.cmd_handler.start_polling()
