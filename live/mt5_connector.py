@@ -272,7 +272,7 @@ class MT5Connector:
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": volume,
+            "volume": round(volume, 2),
             "type": trade_type,
             "price": price,
             "sl": sl,
@@ -1566,6 +1566,15 @@ class LiveTrader:
                 })
                 return
 
+        # ── ROUND SL/TP/LOTS to broker tick precision ──────────────
+        # Eliminates floating-point noise (e.g. 6700.015000000001 → 6700.02)
+        sym_info_round = mt5.symbol_info(symbol)
+        if sym_info_round and sym_info_round.digits >= 0:
+            _digits = sym_info_round.digits
+            sig["stop_loss"] = round(sig["stop_loss"], _digits)
+            sig["tp"] = round(sig["tp"], _digits)
+            sig["entry_price"] = round(sig["entry_price"], _digits)
+
         t_order_start = time.perf_counter()
         result = self.mt5.place_order(
             symbol, order_type, lots,
@@ -1709,7 +1718,7 @@ class LiveTrader:
             "tp1": sig["tp"],
             "tp2": sig["tp"],
             "tp3": sig["tp"],
-            "risk_amount": sizing.get("risk_amount", 0),
+            "risk_amount": actual_risk_amount,
             "risk_points": live_risk_points,
             "signal_risk_points": sig["risk_points"],
             "point_value": sizing.get("point_value", 1.0),
@@ -1727,6 +1736,11 @@ class LiveTrader:
         if ticket in self.tracked_positions:
             self.tracked_positions[ticket]["journal_trade_id"] = trade_id
 
+        # Compute ACTUAL risk based on lots × live_R × point_value
+        # (sizing["risk_amount"] is the intended budget, but margin caps may reduce lots)
+        _pt_val = sizing.get("point_value", 10.0)
+        actual_risk_amount = round(lots * live_risk_points * _pt_val, 2)
+
         self.telegram.trade_entry(
             symbol=symbol,
             direction=order_type.upper(),
@@ -1736,12 +1750,13 @@ class LiveTrader:
             tp2=sig["tp"],
             tp3=sig["tp"],
             lot_size=lots,
-            risk_amount=sizing.get("risk_amount", 0),
+            risk_amount=actual_risk_amount,
         )
 
         logger.info(f"TRADE: {order_type.upper()} {lots} {symbol} @ {fill_price} | "
                      f"SL: {sig['stop_loss']} | TP: {sig['tp']} | "
-                     f"sigR: {sig['risk_points']:.2f} | liveR: {live_risk_points:.2f}")
+                     f"sigR: {sig['risk_points']:.2f} | liveR: {live_risk_points:.2f} | "
+                     f"risk: ${actual_risk_amount:.2f} ({actual_risk_amount/balance*100:.1f}%)")
 
         # Record trade in session recap
         self._session_recap.setdefault(symbol, {}).update({

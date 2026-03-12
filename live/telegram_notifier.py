@@ -78,19 +78,20 @@ class TelegramNotifier:
         """Notify on trade entry"""
         emoji = "🟢" if direction.upper() == "BUY" else "🔴"
         
+        # R distance for display
+        r_pts = abs(entry_price - sl)
+        
         message = f"""
 {emoji} <b>NEW TRADE - {symbol}</b>
 
 <b>Direction:</b> {direction.upper()}
 <b>Entry:</b> {entry_price:.2f}
-<b>Lot Size:</b> {lot_size}
+<b>Lot Size:</b> {lot_size:.2f}
 
-<b>Targets:</b>
-├─ TP1: {tp1:.2f}
-├─ TP2: {tp2:.2f}
-└─ TP3: {tp3:.2f}
-
+<b>TP:</b> {tp1:.2f}
 <b>Stop Loss:</b> {sl:.2f}
+<b>R (SL distance):</b> {r_pts:.2f} pts
+
 <b>Risk:</b> ${risk_amount:.2f}
 
 ⏰ {ist_time()}

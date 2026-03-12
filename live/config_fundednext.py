@@ -515,8 +515,13 @@ def calculate_position_size(account_balance: float, risk_percent: float,
     
     lots = risk_amount / risk_per_lot
     
-    # Round down to volume_step
+    # Round down to volume_step (use round() to avoid float imprecision
+    # e.g. int(113) * 0.01 = 1.1300000000000001 instead of 1.13)
     lots = int(lots / volume_step) * volume_step
+    # Determine precision from volume_step and round to eliminate float noise
+    _vs_str = f"{volume_step:.10f}".rstrip('0')
+    _vs_decimals = len(_vs_str.split('.')[-1]) if '.' in _vs_str else 0
+    lots = round(lots, _vs_decimals)
     
     # Apply broker limits
     lots = max(volume_min, min(lots, volume_max))
