@@ -310,6 +310,30 @@ class MT5Connector:
         else:
             price, trade_type = bid, mt5.ORDER_TYPE_SELL
 
+        # ── PRE-VALIDATE stop distance (avoid "Invalid stops" rejection) ──
+        _sym = mt5.symbol_info(symbol)
+        if _sym:
+            _min_stops = _sym.trade_stops_level * _sym.point  # pts
+            if _min_stops > 0:
+                sl_dist = abs(price - sl)
+                tp_dist = abs(price - tp) if tp else 999999
+                if sl_dist < _min_stops or tp_dist < _min_stops:
+                    logger.warning(
+                        f"{symbol}: Stops too close — SL dist={sl_dist:.2f}, "
+                        f"TP dist={tp_dist:.2f}, min={_min_stops:.2f} pts. "
+                        f"Adjusting to minimum distance.")
+                    # Adjust SL/TP to minimum distance from price
+                    if sl_dist < _min_stops:
+                        if trade_type == mt5.ORDER_TYPE_BUY:
+                            sl = round(price - _min_stops, _sym.digits)
+                        else:
+                            sl = round(price + _min_stops, _sym.digits)
+                    if tp_dist < _min_stops:
+                        if trade_type == mt5.ORDER_TYPE_BUY:
+                            tp = round(price + _min_stops, _sym.digits)
+                        else:
+                            tp = round(price - _min_stops, _sym.digits)
+
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -335,26 +359,28 @@ class MT5Connector:
         logger.info(f"Order placed: {order_type.upper()} {volume} {symbol} @ {price}, SL: {sl}, TP: {tp}")
 
         # IOC fills on some brokers (e.g. FundedNext-Server 2) return result.price=0.0
-        # Recover actual fill price from deal history
+        # Recover actual fill price from deal history with progressive retry
         fill_price = result.price
         position_id = result.order  # default: assume position_id = order_id
         if fill_price == 0.0 and result.deal:
-            try:
-                time.sleep(0.3)  # brief wait for deal to register in history
-                from datetime import timezone as _tz
-                _now = datetime.now(_tz.utc)
-                _start = _now - timedelta(seconds=60)
-                deals = mt5.history_deals_get(_start, _now, ticket=result.deal)
-                if deals and deals[0].price > 0:
-                    fill_price = deals[0].price
-                    logger.info(f"Fill price recovered from deal history: {fill_price}")
-                # Recover position_id from deal (may differ from order_id on some brokers)
-                if deals and hasattr(deals[0], 'position_id') and deals[0].position_id:
-                    position_id = deals[0].position_id
-                    if position_id != result.order:
-                        logger.info(f"Position ID {position_id} differs from order ID {result.order}")
-            except Exception as e:
-                logger.warning(f"Could not recover fill price from deal history: {e}")
+            from datetime import timezone as _tz
+            for _retry in range(4):  # 0.1s, 0.2s, 0.3s, 0.5s
+                time.sleep([0.1, 0.2, 0.3, 0.5][_retry])
+                try:
+                    _now = datetime.now(_tz.utc)
+                    _start = _now - timedelta(seconds=60)
+                    deals = mt5.history_deals_get(_start, _now, ticket=result.deal)
+                    if deals and deals[0].price > 0:
+                        fill_price = deals[0].price
+                        logger.info(f"Fill price recovered from deal history: {fill_price} "
+                                    f"(attempt {_retry + 1})")
+                        if hasattr(deals[0], 'position_id') and deals[0].position_id:
+                            position_id = deals[0].position_id
+                            if position_id != result.order:
+                                logger.info(f"Position ID {position_id} differs from order ID {result.order}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Fill price recovery attempt {_retry + 1} failed: {e}")
         if fill_price == 0.0:
             fill_price = price  # ultimate fallback: use requested price
             logger.warning(f"Fill price still 0.0, using requested price {price} as fallback")
@@ -1529,8 +1555,8 @@ class LiveTrader:
             self.trade_taken_today[symbol] = True
             return
 
-        # Random delay 1-2s (prop-firm detection avoidance)
-        delay = random.uniform(1.0, 2.0)
+        # Random delay 0.3-0.8s (prop-firm detection avoidance)
+        delay = random.uniform(0.3, 0.8)
         time.sleep(delay)
 
         # ── LIVE PRICE for accurate lot sizing ────────────────────────
@@ -2646,7 +2672,7 @@ class LiveTrader:
                 self._error_backoff = 30
 
                 # ── Sleep ──────────────────────────────────────────────
-                time.sleep(10)
+                time.sleep(5)
 
             except KeyboardInterrupt:
                 self._signal_handler(signal.SIGINT, None)
