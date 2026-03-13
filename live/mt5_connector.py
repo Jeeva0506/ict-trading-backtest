@@ -1525,6 +1525,8 @@ class LiveTrader:
                 'reason': f'min_R ({sig["risk_points"]:.1f} pts < {MIN_R_POINTS})',
                 'entry_price': sig.get('entry_price', 0),
             })
+            # Mark trade taken to prevent retry loop (same signal won't improve)
+            self.trade_taken_today[symbol] = True
             return
 
         # Random delay 1-2s (prop-firm detection avoidance)
@@ -1639,6 +1641,9 @@ class LiveTrader:
             self.edge_guard.record_missed_trade(
                 symbol, f"order_failed: {result.get('error', 'unknown')}",
                 sig.get('entry_price', 0))
+            # Mark trade taken to prevent infinite retry loop.
+            # Failed orders (Invalid stops, price drift) won't succeed on retry.
+            self.trade_taken_today[symbol] = True
             return
 
         ticket = result["ticket"]
