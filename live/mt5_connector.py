@@ -1017,6 +1017,11 @@ class LiveTrader:
         balance = account.get("balance", ACCOUNT_SIZE)
         # C1 FIX: Use ACCOUNT_SIZE for overall DD floor (FundedNext measures from initial balance)
         self.dd_protection = DrawdownProtection(ACCOUNT_SIZE)
+        # FIX: Sync daily_start_balance to actual MT5 balance on init.
+        # Without this, DrawdownProtection.__init__ sets daily_start_balance
+        # to ACCOUNT_SIZE (initial), causing a phantom daily DD breach every
+        # restart when the account has any drawdown from initial size.
+        self.dd_protection.reset_daily(balance)
         self.state.current_balance = balance
         self.state.daily_start_balance = balance
         self.state.last_reset_date = _get_fn_day()
@@ -2547,8 +2552,10 @@ class LiveTrader:
 
                     # Daily DD breach -> stop new trades, keep managing
                     if dd["is_daily_dd_breach"]:
+                        if not self.state.is_daily_limit_hit:
+                            # Log and notify only on FIRST breach (not every 10s cycle)
+                            logger.warning(f"Daily DD limit hit: {dd['daily_dd']:.2f}%")
                         self.state.is_daily_limit_hit = True
-                        logger.warning(f"Daily DD limit hit: {dd['daily_dd']:.2f}%")
 
                 # ── Market notifications ───────────────────────────────
                 self._check_market_notifications()
@@ -2563,8 +2570,10 @@ class LiveTrader:
                     if not can:
                         # Send ONE Telegram notification per symbol per day
                         # for non-trivial blocks (skip "market closed" & "already traded")
+                        # Also skip "daily limit hit" — DD warning system handles it separately
                         if reason not in ("market closed", "already traded today",
-                                          "trading disabled", "trading paused"):
+                                          "trading disabled", "trading paused",
+                                          "daily limit hit"):
                             block_key = f"{symbol}_{reason}"
                             last_t = self._block_notify_sent.get(block_key)
                             if last_t is None or (datetime.now() - last_t).total_seconds() > 600:
