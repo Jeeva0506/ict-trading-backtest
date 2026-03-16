@@ -1880,18 +1880,52 @@ class LiveTrader:
                 exit_price = details['exit_price']
                 exit_reason = details['exit_reason']
 
-                # ── Symbol mismatch fallback: use MT5 account balance delta ──
+                # ── Symbol mismatch fallback: compute PnL from position data ──
                 if details.get('symbol_mismatch'):
                     try:
+                        # Method 1: balance delta using pre-manage snapshot
+                        ref_balance = getattr(self, '_pre_manage_balance', self.state.current_balance)
                         acct = mt5.account_info()
                         if acct:
                             new_balance = acct.balance
-                            pnl = round(new_balance - self.state.current_balance, 2)
-                            logger.info(f"Symbol mismatch fallback: balance ${self.state.current_balance:.2f} -> "
+                            pnl = round(new_balance - ref_balance, 2)
+                            logger.info(f"Symbol mismatch fallback: balance ${ref_balance:.2f} -> "
                                         f"${new_balance:.2f}, PnL=${pnl:.2f}")
-                        # Infer exit details from tracked position SL/TP
+
+                        # Method 2: if balance delta is zero (race condition),
+                        # compute expected PnL from tracked position SL/TP + point value
                         sl = info.get('sl_init', 0)
                         tp = info.get('tp', 0)
+                        entry = info.get('entry', 0)
+                        lots = info.get('volume', 0)
+                        direction = info.get('direction', '')
+
+                        if pnl == 0.0 and entry and lots:
+                            pv = self._get_point_value(symbol)
+                            if direction == 'sell':
+                                sl_pnl = round((entry - sl) * lots * pv, 2)  # negative
+                                tp_pnl = round((entry - tp) * lots * pv, 2)  # positive
+                            else:
+                                sl_pnl = round((sl - entry) * lots * pv, 2)  # negative
+                                tp_pnl = round((tp - entry) * lots * pv, 2)  # positive
+                            # Use whichever is closer to actual balance change
+                            if acct:
+                                actual_balance = acct.balance
+                                bal_delta = actual_balance - ref_balance
+                                # If balance dropped, it's SL; if rose, it's TP
+                                if bal_delta < -1.0:  # noticeable loss
+                                    pnl = sl_pnl
+                                    logger.info(f"PnL computed from SL: entry={entry}, SL={sl}, "
+                                                f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
+                                elif bal_delta > 1.0:  # noticeable gain
+                                    pnl = tp_pnl
+                                    logger.info(f"PnL computed from TP: entry={entry}, TP={tp}, "
+                                                f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
+                                else:
+                                    # Truly zero or near-zero — use SL as worst case
+                                    pnl = sl_pnl
+                                    logger.warning(f"Balance delta ~$0 — defaulting to SL PnL=${pnl:.2f}")
+
                         if pnl < 0:
                             exit_price = sl
                             exit_reason = 'SL_HIT'
@@ -2329,11 +2363,41 @@ class LiveTrader:
                                 deals = filtered
                                 logger.info(f"Filtered to {len(deals)} deals for {expected_symbol}")
                             else:
-                                # NO deals match expected symbol — return mismatch flag
-                                # so caller can use MT5 balance fallback instead of wrong data
-                                logger.warning(f"No deals found for {expected_symbol} in position {ticket} — returning symbol_mismatch")
-                                result['symbol_mismatch'] = True
-                                return result
+                                # Try alternative: search ALL recent deals for this symbol
+                                # and match by order ticket or close time proximity
+                                alt_deals = mt5.history_deals_get(start, now, group=f"*{expected_symbol}*")
+                                if alt_deals:
+                                    # Find deals with matching position or order ticket
+                                    matched = [d for d in alt_deals
+                                               if d.position_id == ticket or d.order == ticket]
+                                    if matched:
+                                        deals = matched
+                                        logger.info(f"Alternative lookup found {len(deals)} deals "
+                                                    f"for {expected_symbol} via group filter")
+                                    else:
+                                        # Last resort: find the most recent DEAL_ENTRY_OUT for this symbol
+                                        exit_deals = [d for d in alt_deals if d.entry == 1]
+                                        if exit_deals:
+                                            # Pick the most recent exit within last 60s
+                                            recent = [d for d in exit_deals
+                                                      if (now.timestamp() - d.time) < 60]
+                                            if recent:
+                                                deals = recent[-1:]  # most recent
+                                                logger.info(f"Alternative lookup: using most recent "
+                                                            f"{expected_symbol} exit deal (within 60s)")
+                                            else:
+                                                logger.warning(f"No recent {expected_symbol} exit deals found")
+                                                result['symbol_mismatch'] = True
+                                                return result
+                                        else:
+                                            result['symbol_mismatch'] = True
+                                            return result
+                                else:
+                                    # NO deals match expected symbol — return mismatch flag
+                                    logger.warning(f"No deals found for {expected_symbol} in position "
+                                                   f"{ticket} — returning symbol_mismatch")
+                                    result['symbol_mismatch'] = True
+                                    return result
 
                     result['pnl'] = sum(d.profit + d.commission + d.swap for d in deals)
                     result['commission'] = sum(d.commission for d in deals)
@@ -2627,6 +2691,11 @@ class LiveTrader:
                                          f"R={sig['risk_points']:.2f}")
                         self._execute_signal(symbol, sig)
                     # else: no valid ORB breakout this cycle — silent, normal
+
+                # ── Snapshot balance BEFORE position management ────────
+                # Needed for symbol-mismatch fallback: balance delta must compare
+                # pre-close balance vs post-close balance to compute PnL correctly.
+                self._pre_manage_balance = self.state.current_balance
 
                 # ── Position management (BE, trail, session close) ─────
                 self._manage_positions()
