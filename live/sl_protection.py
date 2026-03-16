@@ -96,6 +96,7 @@ def get_sl_tolerance(entry_price: float, expected_sl: float) -> float:
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN: str = ""
 TELEGRAM_CHAT_ID: str = ""
+ACCOUNT_LABEL: str = ""
 
 # Trading State
 trading_paused_until: Optional[datetime] = None
@@ -116,21 +117,23 @@ logger: Optional[logging.Logger] = None
 # FUNCTION 1: set_telegram_config
 # ============================================================================
 
-def set_telegram_config(bot_token: str, chat_id: str) -> None:
+def set_telegram_config(bot_token: str, chat_id: str, account_label: str = "") -> None:
     """
     Initialize Telegram credentials for alerts.
     
     Args:
         bot_token: Telegram bot token from BotFather
         chat_id: Target chat/channel ID for notifications
+        account_label: Account identifier (e.g. 'STELLAR-2') prepended to alerts
     """
-    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ACCOUNT_LABEL
     
     TELEGRAM_BOT_TOKEN = bot_token
     TELEGRAM_CHAT_ID = chat_id
+    ACCOUNT_LABEL = account_label
     
     if logger:
-        logger.info("Telegram configuration set")
+        logger.info(f"Telegram configuration set (account: {account_label or 'default'})")
 
 
 # ============================================================================
@@ -155,10 +158,16 @@ def send_telegram_alert(message: str) -> bool:
         return False
     
     try:
+        # Prepend account label header (matches TelegramNotifier._tag format)
+        tagged = message
+        if ACCOUNT_LABEL:
+            header = f"━━ 💼 <b>{ACCOUNT_LABEL}</b> ━━"
+            tagged = f"{header}\n{message}"
+
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
+            "text": tagged,
             "parse_mode": "HTML"
         }
         

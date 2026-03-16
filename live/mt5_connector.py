@@ -1080,7 +1080,7 @@ class LiveTrader:
         self._load_state()
 
         # Start subsystems
-        sl_set_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        sl_set_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ACCOUNT_LABEL)
         sl_start_monitoring(log_dir=_log_dir)
         logger.info("SL Protection monitoring started")
 
