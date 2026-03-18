@@ -1279,52 +1279,58 @@ class LiveTrader:
         if m1.empty:
             return None
 
-        # Get MT5 server time and compute DST-safe session boundaries
-        # FIX: Auto-detect broker UTC offset from tick timestamps instead
-        # of hardcoding Europe/Helsinki (which has a different DST schedule
-        # than the FundedNext broker, causing a 1-hour data shift from
-        # US DST start (March 9) until EU DST start (March 29)).
-        import pytz
-        from datetime import timezone as _tz, timedelta as _td
+        # Get MT5 server time and compute session boundaries.
+        # PRIMARY: use mt5_open_hour / mt5_close_hour (fixed server times).
+        # These match the backtest boundaries and are immune to the 3-week
+        # US-DST / EU-non-DST mismatch window (Mar 9–29, Oct–Nov) that
+        # caused the old timezone-conversion code to shift sessions by 1 hr.
+        #
+        # VALIDATION: snap session_start to the first actual M1 bar of the
+        # day if a gap > 30 min is detected (handles any residual DST drift
+        # or broker schedule changes automatically).
         try:
-            utc_now = datetime.now(pytz.UTC)
             broker_offset = self._get_broker_utc_offset()
+            from datetime import timezone as _tz, timedelta as _td
             broker_tz = _tz(_td(hours=broker_offset))
+            import pytz
+            utc_now = datetime.now(pytz.UTC)
             mt5_now = utc_now.astimezone(broker_tz).replace(tzinfo=None)
-
-            # DST-safe: compute session times from market's LOCAL timezone,
-            # then convert to broker server time for data slicing
-            local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
-            local_now = utc_now.astimezone(local_tz)
-            local_today = local_now.date()
-
-            # Session start/end in market local time (aware)
-            local_open = local_tz.localize(datetime(
-                local_today.year, local_today.month, local_today.day,
-                config["market_open_hour"], config["market_open_minute"]))
-            local_close = local_tz.localize(datetime(
-                local_today.year, local_today.month, local_today.day,
-                config["market_close_hour"], config["market_close_minute"]))
-
-            # Convert to broker server time (what the M1 data timestamps use)
-            srv_open = local_open.astimezone(broker_tz).replace(tzinfo=None)
-            srv_close = local_close.astimezone(broker_tz).replace(tzinfo=None)
-
-            session_start = pd.Timestamp(srv_open)
-            session_end = pd.Timestamp(srv_close)
-            logger.debug(f"{symbol}: broker_offset=UTC+{broker_offset}, "
-                         f"session={session_start}-{session_end}")
-        except Exception as e:
-            logger.warning(f"{symbol}: DST-safe session calc failed ({e}), "
-                           f"using config mt5_open fallback")
-            mt5_now = datetime.now()
             today = mt5_now.date()
-            session_start = pd.Timestamp(
-                year=today.year, month=today.month, day=today.day,
-                hour=config["mt5_open_hour"], minute=config["mt5_open_minute"])
-            session_end = pd.Timestamp(
-                year=today.year, month=today.month, day=today.day,
-                hour=config["mt5_close_hour"], minute=config["mt5_close_minute"])
+        except Exception:
+            today = datetime.now().date()
+
+        session_start = pd.Timestamp(
+            year=today.year, month=today.month, day=today.day,
+            hour=config["mt5_open_hour"], minute=config["mt5_open_minute"])
+        session_end = pd.Timestamp(
+            year=today.year, month=today.month, day=today.day,
+            hour=config["mt5_close_hour"], minute=config["mt5_close_minute"])
+
+        # ── Data-driven validation: snap to first bar if config is stale ──
+        # During DST mismatch windows the broker may start the session
+        # up to 1 h earlier/later than mt5_open_hour suggests.  Detect
+        # this by comparing to the actual first bar of today's data.
+        # CAP at 120 min — gaps larger than that indicate extended-hours
+        # data (e.g. US indices pre-market from 09:00 when open=16:30)
+        # and must NOT trigger a snap.
+        today_bars = m1[m1.index.date == today]
+        if len(today_bars) > 0:
+            first_bar = today_bars.index[0]
+            gap_seconds = (session_start - first_bar).total_seconds()
+            gap_minutes = gap_seconds / 60
+            # Only snap for DST-sized gaps: 30–120 min
+            if 30 * 60 < gap_seconds <= 120 * 60:
+                logger.info(f"{symbol}: Session start snapped from {session_start} "
+                            f"to first data bar {first_bar} "
+                            f"(gap={gap_minutes:.0f}min — likely DST offset)")
+                # Preserve session duration — shift end by same amount
+                duration = session_end - session_start
+                session_start = pd.Timestamp(first_bar)
+                session_end = session_start + duration
+            elif gap_seconds > 120 * 60:
+                logger.debug(f"{symbol}: Extended-hours data detected "
+                             f"(first bar {first_bar}, gap={gap_minutes:.0f}min) "
+                             f"— keeping configured session_start {session_start}")
 
         session_data = m1[(m1.index >= session_start) & (m1.index <= session_end)]
         if len(session_data) < 20:
@@ -2077,42 +2083,29 @@ class LiveTrader:
                 import pytz
                 force_close_triggered = False
                 try:
-                    utc_now = datetime.now(pytz.UTC)
-                    # DST-safe: use market's local timezone for force-close time
-                    local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
-                    local_now = utc_now.astimezone(local_tz).replace(tzinfo=None)
+                    # Use server-time force-close to match session boundaries
+                    # and avoid DST-mismatch bugs between US/EU clocks.
+                    from datetime import timezone as _fctz, timedelta as _fctd
+                    _fc_offset = self._get_broker_utc_offset()
+                    _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
+                    _fc_utc_now = datetime.now(pytz.UTC)
+                    local_now = _fc_utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
                     now_min = local_now.hour * 60 + local_now.minute
 
-                    # Force-close times from config (local market timezone)
+                    # Use mt5_ hours (fixed server time, DST-immune)
                     force_h = config.get("force_close_hour", config["market_close_hour"])
                     force_m = config.get("force_close_minute", config.get("market_close_minute", 0))
-                    close_h = config["market_close_hour"]
-                    close_m = config["market_close_minute"]
-                    force_min = force_h * 60 + force_m
-                    close_min = close_h * 60 + close_m
+                    # Convert force_close from local market tz to server tz
+                    # by using the mt5_close as anchor and offset back 15 min
+                    mt5_close_h = config.get("mt5_close_hour", 23)
+                    mt5_close_m = config.get("mt5_close_minute", 0)
+                    force_min = mt5_close_h * 60 + mt5_close_m - 15  # 15 min before session end
+                    close_min = mt5_close_h * 60 + mt5_close_m
 
                     if force_min <= now_min < close_min:
                         force_close_triggered = True
                 except Exception as tz_err:
-                    # C7 FIX: Fallback uses auto-detected broker offset
-                    logger.warning(f"Timezone fallback for {symbol}: {tz_err}")
-                    try:
-                        from datetime import timezone as _fctz, timedelta as _fctd
-                        _fc_offset = self._get_broker_utc_offset()
-                        _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
-                        _fc_utc_now = datetime.now(pytz.UTC)
-                        local_now = _fc_utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
-                        now_min = local_now.hour * 60 + local_now.minute
-                        # C7 FIX: Use mt5_ hours (already in server time)
-                        force_h = config.get("mt5_close_hour", 23)
-                        force_m = config.get("mt5_close_minute", 0)
-                        force_min = (force_h * 60 + force_m) - 15
-                        close_min = force_h * 60 + force_m
-
-                        if force_min <= now_min < close_min:
-                            force_close_triggered = True
-                    except Exception as fb_err:
-                        logger.error(f"Force-close fallback also failed for {symbol}: {fb_err}")
+                    logger.error(f"Force-close time check failed for {symbol}: {tz_err}")
 
                 # F1+F3 FIX: Single force-close path, use deal history for accurate PnL
                 if force_close_triggered:
