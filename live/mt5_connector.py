@@ -1310,16 +1310,17 @@ class LiveTrader:
         # During DST mismatch windows the broker may start the session
         # up to 1 h earlier/later than mt5_open_hour suggests.  Detect
         # this by comparing to the actual first bar of today's data.
-        # CAP at 120 min — gaps larger than that indicate extended-hours
-        # data (e.g. US indices pre-market from 09:00 when open=16:30)
-        # and must NOT trigger a snap.
+        # CAP at 90 min — a real DST shift is exactly 60 min; with some
+        # tolerance for late first bars this covers it.  Gaps > 90 min
+        # are pre-market / extended-hours data (e.g. US indices serving
+        # bars from ~14:33 when cash open is 16:30) and must NOT snap.
         today_bars = m1[m1.index.date == today]
         if len(today_bars) > 0:
             first_bar = today_bars.index[0]
             gap_seconds = (session_start - first_bar).total_seconds()
             gap_minutes = gap_seconds / 60
-            # Only snap for DST-sized gaps: 30–120 min
-            if 30 * 60 < gap_seconds <= 120 * 60:
+            # Only snap for DST-sized gaps: 30–90 min
+            if 30 * 60 < gap_seconds <= 90 * 60:
                 logger.info(f"{symbol}: Session start snapped from {session_start} "
                             f"to first data bar {first_bar} "
                             f"(gap={gap_minutes:.0f}min — likely DST offset)")
@@ -1327,8 +1328,8 @@ class LiveTrader:
                 duration = session_end - session_start
                 session_start = pd.Timestamp(first_bar)
                 session_end = session_start + duration
-            elif gap_seconds > 120 * 60:
-                logger.debug(f"{symbol}: Extended-hours data detected "
+            elif gap_seconds > 90 * 60:
+                logger.debug(f"{symbol}: Pre-market/extended-hours data "
                              f"(first bar {first_bar}, gap={gap_minutes:.0f}min) "
                              f"— keeping configured session_start {session_start}")
 
