@@ -1072,6 +1072,7 @@ class LiveTrader:
                 max_sl_points=cfg.get("max_sl_points", 80.0),  # Aligned with backtest
                 tp3_r=2.5,
                 tp1_r=1.0,
+                orb_bias_filter=False,  # v3.14.0: HTF-only mode (15yr A/B validated, +62% total R)
                 debug=True,   # Enable detection logging for live diagnostics
             )
             self.trade_taken_today[symbol] = False
@@ -1366,7 +1367,7 @@ class LiveTrader:
                         reject_reason = d.get('reason', 'unknown')
                         break
                     if d.get('event') == 'TREND_CONFLICT':
-                        reject_reason = f"HTF={d.get('htf_trend')} vs ORB={d.get('orb_bias')}"
+                        reject_reason = f"HTF={d.get('htf_trend')} vs ORB={d.get('orb_bias')} (bias filter ON)"
                         break
 
                 has_signal = '>>> SIGNAL' if signals else 'no signal'

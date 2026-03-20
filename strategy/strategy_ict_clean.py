@@ -88,6 +88,8 @@ class StrategyICTClean:
         tp1_r: float = 1.0,                        # BE trigger level
         tp3_r: float = 2.5,                        # actual TP target
         trail_buffer_r: float = 0.5,                # trail SL = MFE - trail_buffer_r
+        # --- trend filter ---
+        orb_bias_filter: bool = False,               # False = HTF-only (15yr validated), True = require ORB bias == HTF
         # --- second chance rule ---
         allow_second_chance: bool = False,           # if True: lose trade #1 → allow opposite dir trade #2
         **_kwargs,                                  # absorb legacy params from old callers
@@ -118,6 +120,9 @@ class StrategyICTClean:
         self.tp1_r = float(tp1_r)
         self.tp3_r = float(tp3_r)
         self.trail_buffer_r = float(trail_buffer_r)  # trail buffer in R
+
+        # Trend filter
+        self.orb_bias_filter = bool(orb_bias_filter)
 
         # Second chance rule
         self.allow_second_chance = bool(allow_second_chance)
@@ -351,17 +356,22 @@ class StrategyICTClean:
 
         self._log(event="ORB", time=session_start, orbH=orbH, orbL=orbL, orb_range=orb_range)
 
-        # Trend direction filter: require BOTH HTF + ORB bias to agree (double confirmation)
-        # This maximizes quality: only trade when intraday momentum AND structural trend align
+        # Trend direction filter
         orb_open = float(orb.iloc[0]["open"])
         orb_close = float(orb.iloc[-1]["close"])
         orb_bias = "bullish" if orb_close > orb_open else "bearish"
-        if htf_trend is not None:
-            if htf_trend != orb_bias:
-                self._log(event="TREND_CONFLICT", time=session_start,
-                          htf_trend=htf_trend, orb_bias=orb_bias)
-                return out
-        trend_filter = orb_bias  # both agree at this point
+
+        if self.orb_bias_filter:
+            # Double confirmation: require BOTH HTF + ORB bias to agree
+            if htf_trend is not None:
+                if htf_trend != orb_bias:
+                    self._log(event="TREND_CONFLICT", time=session_start,
+                              htf_trend=htf_trend, orb_bias=orb_bias)
+                    return out
+            trend_filter = orb_bias  # both agree at this point
+        else:
+            # HTF-only mode: trade in HTF direction regardless of ORB bias
+            trend_filter = htf_trend if htf_trend is not None else orb_bias
 
         scan = w[(w.index >= orb_end) & (w.index < entry_cutoff)]
         if len(scan) < 10:

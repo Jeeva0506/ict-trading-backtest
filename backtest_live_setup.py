@@ -438,7 +438,8 @@ def get_htf_trend_for_day(htf_ema: pd.DataFrame, session_start: pd.Timestamp) ->
 
 
 def run_live_simulation(run_days: int | None = 15, debug_strategy: bool = False, symbol: str = "SPX500",
-                        m1_file: str | None = None, h1_file: str | None = None):
+                        m1_file: str | None = None, h1_file: str | None = None,
+                        orb_bias_filter: bool = True):
     """Run single-index backtest. Optionally override data files."""
     cfg = LIVE_INDEX_CONFIG[symbol]
     data_file = m1_file if m1_file else cfg["local_file"]
@@ -498,6 +499,7 @@ def run_live_simulation(run_days: int | None = 15, debug_strategy: bool = False,
             breakout_margin=cfg.get("breakout_margin", 0.10),
             orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
             tp3_r=2.5,
+            orb_bias_filter=orb_bias_filter,
         )
         signals = strategy.generate_signals(market_df, htf_trend=htf_trend)
         for s in signals:
