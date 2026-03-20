@@ -72,21 +72,16 @@ FUNDEDNEXT_RULES = {
 # To activate: uncomment FUNDED block below, comment out EVALUATION block.
 #
 # ── EVALUATION (active) ──
-# 3-tier step-down: reduces risk progressively as DD deepens
-# Tier 1: 0-3% DD → 1.5% risk (aggressive to pass fast)
-# Tier 2: 3-5% DD → 0.75% risk (protect, still trading)
-# Tier 3: 5-8% DD → 0.5% risk (survival mode)
-# Above 8% → daily_drawdown_stop kicks in, no new trades
+# 2-tier step-down: conservative risk with single step-down
+# Tier 1: 0-4% DD → 1.0% risk (balanced: fast enough to pass, safe enough to survive)
+# Tier 2: 4%+ DD → 0.5% risk (survival mode — need ~12 net losses to breach 10%)
+# Backtested 10yr: 71% pass rate, 7 breaches over 15+ years
 ADAPTIVE_RISK = {
     'enabled': True,
-    'default_risk_percent': 1.5,    # Tier 1: no DD pressure
-    'tier2_risk_percent': 0.75,     # Tier 2: moderate DD
-    'tier3_risk_percent': 0.5,      # Tier 3: deep DD, survival mode
-    'reduced_risk_percent': 0.75,   # Legacy key (backward compat) = tier2
-    'tier2_threshold': 3.0,         # Switch to tier2 at 3% DD from initial
-    'tier3_threshold': 5.0,         # Switch to tier3 at 5% DD from initial
-    'drawdown_threshold': 3.0,      # Legacy key = tier2_threshold
-    'recovery_threshold': 1.0,      # Restore to previous tier when DD recovers below this offset
+    'default_risk_percent': 1.0,    # Tier 1: DD < 4%
+    'tier2_risk_percent': 0.5,      # Tier 2: DD >= 4%, survival mode
+    'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD from initial
+    'recovery_threshold': 1.0,      # Restore to tier1 when DD recovers below this offset
 }
 #
 # ── FUNDED (activate after passing challenge) ──

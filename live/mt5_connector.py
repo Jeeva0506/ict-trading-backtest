@@ -173,7 +173,7 @@ class DrawdownProtection:
             "can_trade": overall_dd < max_dd_limit and daily_dd < daily_dd_stop,
         }
 
-    # ── adaptive risk (3-tier step-down) ─────────────────────────────────
+    # ── adaptive risk (2-tier step-down) ─────────────────────────────────
     def get_adaptive_risk(self, current_balance: float) -> float:
         if not ADAPTIVE_RISK.get("enabled", False):
             return FUNDEDNEXT_RULES["risk_per_trade_percent"]
@@ -185,16 +185,11 @@ class DrawdownProtection:
         dd_pct = ((self.initial_balance - current_balance) / self.initial_balance) * 100
         dd_pct = max(0.0, dd_pct)  # can't be negative
 
-        default_r = ADAPTIVE_RISK.get("default_risk_percent", 1.5)
-        tier2_r   = ADAPTIVE_RISK.get("tier2_risk_percent", ADAPTIVE_RISK.get("reduced_risk_percent", 0.75))
-        tier3_r   = ADAPTIVE_RISK.get("tier3_risk_percent", 0.5)
-        tier2_dd  = ADAPTIVE_RISK.get("tier2_threshold", ADAPTIVE_RISK.get("drawdown_threshold", 3.0))
-        tier3_dd  = ADAPTIVE_RISK.get("tier3_threshold", 5.0)
+        default_r = ADAPTIVE_RISK.get("default_risk_percent", 1.0)
+        tier2_r   = ADAPTIVE_RISK.get("tier2_risk_percent", 0.5)
+        tier2_dd  = ADAPTIVE_RISK.get("tier2_threshold", 4.0)
 
-        if dd_pct >= tier3_dd:
-            logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {tier3_dd}% -> {tier3_r}% risk (TIER 3)")
-            return tier3_r
-        elif dd_pct >= tier2_dd:
+        if dd_pct >= tier2_dd:
             logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {tier2_dd}% -> {tier2_r}% risk (TIER 2)")
             return tier2_r
         return default_r
@@ -2054,8 +2049,6 @@ class LiveTrader:
                     # Risk tier label
                     _risk_pct = self.dd_protection.get_adaptive_risk(_bal_after)
                     if _risk_pct <= 0.5:
-                        _risk_tier = 'TIER 3'
-                    elif _risk_pct <= 0.75:
                         _risk_tier = 'TIER 2'
                     else:
                         _risk_tier = 'TIER 1'
@@ -2200,7 +2193,7 @@ class LiveTrader:
                             _sc_bal = self.state.current_balance + pnl
                             _sc_dd = round(((ACCOUNT_SIZE - _sc_bal) / ACCOUNT_SIZE) * 100, 2) if ACCOUNT_SIZE else 0
                             _sc_risk = self.dd_protection.get_adaptive_risk(_sc_bal)
-                            _sc_tier = 'TIER 3' if _sc_risk <= 0.5 else ('TIER 2' if _sc_risk <= 0.75 else 'TIER 1')
+                            _sc_tier = 'TIER 2' if _sc_risk <= 0.5 else 'TIER 1'
                             self.journal.close_trade(trade_id, {
                                 "exit_price": _fc_exit_price,
                                 "exit_reason": "SESSION_CLOSE",
