@@ -1607,17 +1607,38 @@ class LiveTrader:
             self.edge_guard.record_missed_trade(symbol, "zero_lot_size", sig.get('entry_price', 0))
             return
 
-        # ── PRE-ORDER DRIFT — LOG ONLY (no rejection) ─────────────────
-        # Backtest does not have a pre-order drift guard. Removing the
-        # rejection here to match backtest behavior. We still LOG the drift
-        # for execution quality monitoring but do NOT block the trade.
+        # ── DRIFT GUARD (v3.14.1) ──────────────────────────────────────
+        # Reject trades where price has drifted > MAX_DRIFT_R from signal
+        # entry.  Backtested on 2.8yr (6 idx) and 10yr (5 idx):
+        #   2.8yr: ±0.75R = +402R (best), ±1.00R = +392R (-2.5%)
+        #   10yr:  ±1.00R = +1267R,        ±0.75R = +1192R (-6%)
+        # ±1.00R balances both datasets and blocks extreme drift (>1.65R).
+        MAX_DRIFT_R = 1.00  # R-multiples — validated via run_drift_guard_sim.py
         if expected_price and sig["risk_points"] > 0:
             drift_from_signal = abs(expected_price - sig["entry_price"])
-            if drift_from_signal > 0.5 * sig["risk_points"]:
+            drift_r = drift_from_signal / sig["risk_points"]
+            if drift_r > MAX_DRIFT_R:
+                logger.warning(
+                    f"{symbol}: DRIFT GUARD — price drifted {drift_from_signal:.2f} pts "
+                    f"({drift_r:.2f}R) from signal entry ({sig['entry_price']:.2f} → "
+                    f"{expected_price:.2f}). Max allowed: {MAX_DRIFT_R}R. Trade REJECTED.")
+                self.edge_guard.record_missed_trade(
+                    symbol, f"drift_guard_{drift_r:.2f}R",
+                    sig.get('entry_price', 0))
+                self.telegram.send_message(
+                    f"⚠️ {symbol}: Trade skipped — price drifted {drift_r:.2f}R "
+                    f"({drift_from_signal:.1f} pts) from signal. Max {MAX_DRIFT_R}R.")
+                self._session_recap.setdefault(symbol, {}).update({
+                    'signal_found': True, 'signal_dir': sig.get('direction', ''),
+                    'reason': f'drift_guard ({drift_r:.2f}R > {MAX_DRIFT_R}R)',
+                    'entry_price': sig.get('entry_price', 0),
+                })
+                return
+            elif drift_r > 0.25:
                 logger.info(
-                    f"{symbol}: PRE-ORDER DRIFT (info only) — price moved {drift_from_signal:.2f} pts "
-                    f"from signal entry ({sig['entry_price']:.2f}) during delay. "
-                    f"(0.5R = {0.5 * sig['risk_points']:.2f}). Proceeding with order.")
+                    f"{symbol}: PRE-ORDER DRIFT — {drift_from_signal:.2f} pts "
+                    f"({drift_r:.2f}R) from signal entry. Within guard ({MAX_DRIFT_R}R). "
+                    f"Proceeding.")
 
         # ── SPREAD-TO-R GUARD ──────────────────────────────────────────
         # Reject if spread > 30% of risk (R) — spread eats too much edge.
@@ -1651,6 +1672,29 @@ class LiveTrader:
                     'entry_price': sig.get('entry_price', 0),
                 })
                 return
+
+        # ── TP RECALCULATION FROM LIVE PRICE (v3.14.1) ────────────────
+        # Backtest: TP = entry ± R × tp_r, where entry IS the fill price.
+        # Live pre-fix: signal TP was anchored to the strategy's entry_price
+        # (a past bar's open), which can drift far from current market.
+        # Fix: recalculate TP from expected_price (live bid/ask) so the R:R
+        # ratio matches backtest behavior (2.5R from actual execution price).
+        _tp_r = 2.5  # default
+        if expected_price and live_risk_points > 0 and sig["risk_points"] > 0:
+            _tp_r = abs(sig["tp"] - sig["entry_price"]) / sig["risk_points"]
+            if _tp_r < 1.0 or _tp_r > 10.0:
+                _tp_r = 2.5  # sanity fallback
+            original_tp = sig["tp"]
+            if order_type == "buy":
+                sig["tp"] = expected_price + live_risk_points * _tp_r
+            else:
+                sig["tp"] = expected_price - live_risk_points * _tp_r
+            tp_shift = abs(sig["tp"] - original_tp)
+            if tp_shift > 0.01:
+                logger.info(
+                    f"{symbol}: TP recalculated from live price — "
+                    f"{original_tp:.2f} → {sig['tp']:.2f} "
+                    f"(shift={tp_shift:.2f} pts, tp_r={_tp_r:.1f})")
 
         # ── ROUND SL/TP/LOTS to broker tick precision ──────────────
         # Eliminates floating-point noise (e.g. 6700.015000000001 → 6700.02)
@@ -1746,6 +1790,32 @@ class LiveTrader:
                 sig.get('entry_price', 0))
             self._save_state()
             return
+
+        # ── TP FINE-TUNE FROM ACTUAL FILL (v3.14.1) ──────────────────
+        # If fill differs from expected_price (slippage), adjust TP so
+        # it's exactly _tp_r × R from the actual fill price.
+        # This is an exact match of backtest behavior where entry IS fill.
+        fill_R = abs(fill_price - sig["stop_loss"])
+        if fill_R > 0:
+            if order_type == "buy":
+                final_tp = fill_price + fill_R * _tp_r
+            else:
+                final_tp = fill_price - fill_R * _tp_r
+            # Round to broker digits
+            _rd = sym_info_round.digits if (sym_info_round and hasattr(sym_info_round, 'digits') and sym_info_round.digits >= 0) else 2
+            final_tp = round(final_tp, _rd)
+            if abs(final_tp - sig["tp"]) > 0.01:
+                ok = self.mt5.modify_position(ticket, tp=final_tp)
+                if ok:
+                    logger.info(
+                        f"{symbol}: TP fine-tuned from fill — "
+                        f"{sig['tp']:.2f} → {final_tp:.2f} "
+                        f"(fill={fill_price}, fill_R={fill_R:.2f})")
+                else:
+                    logger.warning(f"{symbol}: Failed to fine-tune TP from fill price")
+            sig["tp"] = final_tp
+            # Use fill-based R for tracked_positions (matches backtest: R = |entry - SL|)
+            live_risk_points = fill_R
 
         # F2 FIX: Track position and mark trade taken BEFORE SL verification.
         # This prevents re-entry loops if SL verification fails and emergency-closes,
