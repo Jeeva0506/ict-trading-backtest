@@ -1276,58 +1276,80 @@ class LiveTrader:
             return None
 
         # Get MT5 server time and compute session boundaries.
-        # PRIMARY: use mt5_open_hour / mt5_close_hour (fixed server times).
-        # These match the backtest boundaries and are immune to the 3-week
-        # US-DST / EU-non-DST mismatch window (Mar 9–29, Oct–Nov) that
-        # caused the old timezone-conversion code to shift sessions by 1 hr.
+        # v3.14.3 FIX: Dynamically convert market local open/close times
+        # to broker time using the broker's actual UTC offset.
+        # This is DST-proof: during the 3-week US-DST / EU-CET mismatch
+        # (Mar 9–29, Oct–Nov), the old static mt5_open_hour was wrong by 1h.
+        # GER30 had pre-market data so the DST snap couldn't detect the shift,
+        # causing ORB to form from pre-market bars → bad signals + drift spam.
         #
-        # VALIDATION: snap session_start to the first actual M1 bar of the
-        # day if a gap > 30 min is detected (handles any residual DST drift
-        # or broker schedule changes automatically).
+        # Now: market_open_hour (local tz) → UTC → broker time
+        # Fallback: static mt5_open_hour + DST snap (kept as safety net).
+        import pytz
+        from datetime import timezone as _tz, timedelta as _td
         try:
             broker_offset = self._get_broker_utc_offset()
-            from datetime import timezone as _tz, timedelta as _td
             broker_tz = _tz(_td(hours=broker_offset))
-            import pytz
             utc_now = datetime.now(pytz.UTC)
             mt5_now = utc_now.astimezone(broker_tz).replace(tzinfo=None)
             today = mt5_now.date()
         except Exception:
+            broker_offset = None
             today = datetime.now().date()
 
-        session_start = pd.Timestamp(
-            year=today.year, month=today.month, day=today.day,
-            hour=config["mt5_open_hour"], minute=config["mt5_open_minute"])
-        session_end = pd.Timestamp(
-            year=today.year, month=today.month, day=today.day,
-            hour=config["mt5_close_hour"], minute=config["mt5_close_minute"])
+        # ── Dynamic session boundaries from local timezone ────────
+        # Convert market's local open/close → broker time
+        _used_dynamic = False
+        if broker_offset is not None and config.get('timezone'):
+            try:
+                local_tz = pytz.timezone(config['timezone'])
+                # Build market open/close in the INDEX's local timezone
+                local_open = local_tz.localize(datetime(
+                    today.year, today.month, today.day,
+                    config['market_open_hour'], config['market_open_minute']))
+                local_close = local_tz.localize(datetime(
+                    today.year, today.month, today.day,
+                    config['market_close_hour'], config['market_close_minute']))
+                # Convert to broker timezone
+                broker_tz_obj = _tz(_td(hours=broker_offset))
+                broker_open = local_open.astimezone(broker_tz_obj).replace(tzinfo=None)
+                broker_close = local_close.astimezone(broker_tz_obj).replace(tzinfo=None)
+                session_start = pd.Timestamp(broker_open)
+                session_end = pd.Timestamp(broker_close)
+                _used_dynamic = True
+                # Log on first detection per symbol per day
+                if not self._detection_logged_today.get(symbol, False):
+                    logger.info(
+                        f"{symbol}: Session boundaries (dynamic) — "
+                        f"local {config['market_open_hour']:02d}:{config['market_open_minute']:02d} "
+                        f"{config['timezone']} → broker {broker_open.hour:02d}:{broker_open.minute:02d} "
+                        f"(UTC+{broker_offset})")
+            except Exception as e:
+                logger.warning(f"{symbol}: Dynamic session calc failed ({e}), "
+                               f"falling back to static mt5_open_hour")
 
-        # ── Data-driven validation: snap to first bar if config is stale ──
-        # During DST mismatch windows the broker may start the session
-        # up to 1 h earlier/later than mt5_open_hour suggests.  Detect
-        # this by comparing to the actual first bar of today's data.
-        # CAP at 90 min — a real DST shift is exactly 60 min; with some
-        # tolerance for late first bars this covers it.  Gaps > 90 min
-        # are pre-market / extended-hours data (e.g. US indices serving
-        # bars from ~14:33 when cash open is 16:30) and must NOT snap.
-        today_bars = m1[m1.index.date == today]
-        if len(today_bars) > 0:
-            first_bar = today_bars.index[0]
-            gap_seconds = (session_start - first_bar).total_seconds()
-            gap_minutes = gap_seconds / 60
-            # Only snap for DST-sized gaps: 30–90 min
-            if 30 * 60 < gap_seconds <= 90 * 60:
-                logger.info(f"{symbol}: Session start snapped from {session_start} "
-                            f"to first data bar {first_bar} "
-                            f"(gap={gap_minutes:.0f}min — likely DST offset)")
-                # Preserve session duration — shift end by same amount
-                duration = session_end - session_start
-                session_start = pd.Timestamp(first_bar)
-                session_end = session_start + duration
-            elif gap_seconds > 90 * 60:
-                logger.debug(f"{symbol}: Pre-market/extended-hours data "
-                             f"(first bar {first_bar}, gap={gap_minutes:.0f}min) "
-                             f"— keeping configured session_start {session_start}")
+        if not _used_dynamic:
+            # Fallback: static config values (EET-based)
+            session_start = pd.Timestamp(
+                year=today.year, month=today.month, day=today.day,
+                hour=config["mt5_open_hour"], minute=config["mt5_open_minute"])
+            session_end = pd.Timestamp(
+                year=today.year, month=today.month, day=today.day,
+                hour=config["mt5_close_hour"], minute=config["mt5_close_minute"])
+
+            # ── Data-driven snap (safety net for static fallback) ─────
+            today_bars = m1[m1.index.date == today]
+            if len(today_bars) > 0:
+                first_bar = today_bars.index[0]
+                gap_seconds = (session_start - first_bar).total_seconds()
+                gap_minutes = gap_seconds / 60
+                if 30 * 60 < gap_seconds <= 90 * 60:
+                    logger.info(f"{symbol}: Session start snapped from {session_start} "
+                                f"to first data bar {first_bar} "
+                                f"(gap={gap_minutes:.0f}min — likely DST offset)")
+                    duration = session_end - session_start
+                    session_start = pd.Timestamp(first_bar)
+                    session_end = session_start + duration
 
         session_data = m1[(m1.index >= session_start) & (m1.index <= session_end)]
         if len(session_data) < 20:
@@ -1620,14 +1642,22 @@ class LiveTrader:
                 self.edge_guard.record_missed_trade(
                     symbol, f"drift_guard_{drift_r:.2f}R",
                     sig.get('entry_price', 0))
-                self.telegram.send_message(
-                    f"⚠️ {symbol}: Trade skipped — price drifted {drift_r:.2f}R "
-                    f"({drift_from_signal:.1f} pts) from signal. Max {MAX_DRIFT_R}R.")
+                # v3.14.3: Send Telegram ONCE per symbol per day (not every cycle)
+                _drift_key = f"drift_{symbol}"
+                if not self._block_notify_sent.get(_drift_key):
+                    self.telegram.send_message(
+                        f"⚠️ {symbol}: Trade skipped — price drifted {drift_r:.2f}R "
+                        f"({drift_from_signal:.1f} pts) from signal. Max {MAX_DRIFT_R}R.")
+                    self._block_notify_sent[_drift_key] = datetime.now()
                 self._session_recap.setdefault(symbol, {}).update({
                     'signal_found': True, 'signal_dir': sig.get('direction', ''),
                     'reason': f'drift_guard ({drift_r:.2f}R > {MAX_DRIFT_R}R)',
                     'entry_price': sig.get('entry_price', 0),
                 })
+                # v3.14.3: Mark trade as taken to STOP RETRY LOOP
+                # The signal entry is fixed; price won't improve. Without this,
+                # the bot retries every ~6s generating 10+ rejections/minute.
+                self.trade_taken_today[symbol] = True
                 return
             elif drift_r > 0.25:
                 logger.info(
@@ -1658,14 +1688,20 @@ class LiveTrader:
                 self.edge_guard.record_missed_trade(
                     symbol, f"spread_guard_{spread_r_ratio:.0%}R",
                     sig.get('entry_price', 0))
-                self.telegram.send_message(
-                    f"⚠️ {symbol}: Trade skipped — spread {spread_points:.1f} pts "
-                    f"= {spread_r_ratio:.0%} of R (max {MAX_SPREAD_R_PCT:.0%})")
+                # v3.14.3: Send Telegram ONCE per symbol per day
+                _spread_key = f"spread_{symbol}"
+                if not self._block_notify_sent.get(_spread_key):
+                    self.telegram.send_message(
+                        f"⚠️ {symbol}: Trade skipped — spread {spread_points:.1f} pts "
+                        f"= {spread_r_ratio:.0%} of R (max {MAX_SPREAD_R_PCT:.0%})")
+                    self._block_notify_sent[_spread_key] = datetime.now()
                 self._session_recap.setdefault(symbol, {}).update({
                     'signal_found': True, 'signal_dir': sig.get('direction', ''),
                     'reason': f'spread_guard ({spread_r_ratio:.0%} of R)',
                     'entry_price': sig.get('entry_price', 0),
                 })
+                # v3.14.3: Mark trade as taken to stop retry (spread won't improve mid-session)
+                self.trade_taken_today[symbol] = True
                 return
 
         # ── TP RECALCULATION FROM LIVE PRICE (v3.14.1) ────────────────
@@ -2724,12 +2760,15 @@ class LiveTrader:
                         # Send ONE Telegram notification per symbol per day
                         # for non-trivial blocks (skip "market closed" & "already traded")
                         # Also skip "daily limit hit" — DD warning system handles it separately
+                        # v3.14.3: Also skip "SL protection pause" — transient, auto-resolves
                         if reason not in ("market closed", "already traded today",
                                           "trading disabled", "trading paused",
-                                          "daily limit hit"):
+                                          "daily limit hit", "SL protection pause"):
                             block_key = f"{symbol}_{reason}"
                             last_t = self._block_notify_sent.get(block_key)
-                            if last_t is None or (datetime.now() - last_t).total_seconds() > 600:
+                            # v3.14.3: Throttle block notifications to ONCE PER DAY per key
+                            # (was 600s = 10min, generated 6+ messages/hour per symbol)
+                            if last_t is None or (datetime.now() - last_t).total_seconds() > 86400:
                                 self.telegram.send_message(
                                     f"\u26a0\ufe0f <b>Trade Blocked — {symbol}</b>\n\n"
                                     f"<b>Reason:</b> {reason}\n"

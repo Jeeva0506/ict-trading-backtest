@@ -178,21 +178,49 @@ def run_test_mode():
 
 
 def _acquire_bot_lock():
-    """Prevent duplicate bot instances. If another bot process is alive, exit."""
+    """Prevent duplicate bot instances.
+
+    v3.14.3: Kill-and-replace instead of exit.
+    Old behavior: if another bot existed, we'd exit — leaving stale
+    pre-update processes running forever.
+    New behavior: kill the stale process and take over the lock.
+    """
     _label = ACCOUNT_LABEL.lower().replace(' ', '_')
     lock = Path(__file__).parent / 'live' / 'logs' / _label / 'bot.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
-    if lock.exists():
-        try:
-            old_pid = int(lock.read_text().strip())
-            import psutil
-            if psutil.pid_exists(old_pid):
-                proc = psutil.Process(old_pid)
-                if 'python' in proc.name().lower():
-                    print(f"[ABORT] Bot already running (PID {old_pid}). Exiting.")
-                    sys.exit(0)
-        except Exception:
-            pass  # stale/corrupt lock — overwrite
+
+    # Also kill ANY other run_live.py with same --account arg
+    try:
+        import psutil
+        my_pid = os.getpid()
+        my_account = _pre_args.account or ''
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                if proc.info['pid'] == my_pid:
+                    continue
+                name = (proc.info['name'] or '').lower()
+                if 'python' not in name:
+                    continue
+                cmdline = proc.info.get('cmdline') or []
+                cmdline_str = ' '.join(cmdline)
+                if 'run_live.py' not in cmdline_str:
+                    continue
+                # Check account match
+                other_account = ''
+                for i, arg in enumerate(cmdline):
+                    if arg == '--account' and i + 1 < len(cmdline):
+                        other_account = cmdline[i + 1]
+                if other_account == my_account:
+                    print(f"[CLEANUP] Killing stale bot PID {proc.info['pid']} "
+                          f"(account={other_account or 'default'})")
+                    proc.kill()
+                    proc.wait(timeout=5)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                pass
+    except Exception as e:
+        print(f"[WARN] Stale process cleanup failed: {e}")
+
+    # Write our PID
     lock.write_text(str(os.getpid()))
     import atexit
     atexit.register(lambda: lock.unlink(missing_ok=True))
