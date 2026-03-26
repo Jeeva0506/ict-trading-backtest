@@ -1056,12 +1056,12 @@ class LiveTrader:
             self.strategies[symbol] = StrategyICTClean(
                 sl_buffer=cfg.get("sl_buffer", 1.0),
                 orb_minutes=cfg.get("orb_minutes", 15),
-                entry_hours=cfg.get("entry_hours", 3),
+                entry_hours=cfg.get("entry_hours", 2),
                 breakout_window_minutes=cfg.get("breakout_window_minutes", 60),
-                disp_mult=cfg.get("disp_mult", 1.0),       # Universal (aligned with backtest)
-                body_min=cfg.get("body_min", 0.70),         # Universal (aligned with backtest)
+                disp_mult=cfg.get("disp_mult", 1.5),       # Backtest-validated: 1.5 from config
+                body_min=cfg.get("body_min", 0.60),         # Backtest-validated: 0.60 from config
                 close_strength=cfg.get("close_strength", 0.25),
-                breakout_margin=cfg.get("breakout_margin", 0.15),  # Universal (aligned with backtest)
+                breakout_margin=cfg.get("breakout_margin", 0.10),  # Backtest-validated: 0.10 from config
                 orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
                 min_sl_points=cfg.get("min_sl_points", 2.0),
                 max_sl_points=cfg.get("max_sl_points", 80.0),  # Aligned with backtest
@@ -1434,26 +1434,25 @@ class LiveTrader:
             })
             return None  # signal is old
 
-        # Price drift guard — BACKTEST-MATCHED
+        # Price drift guard — BACKTEST-MATCHED at ±1.0R
         # Compare signal_price (breakout/retest candle close) vs entry_price
         # (next bar open). This is the same check the backtest uses.
-        # Previously this compared live market price vs entry_price, which
-        # blocked ~74% of valid signals due to execution latency.
+        # Changed from 0.5R to 1.0R to match 10yr drift analysis validation.
         signal_price = getattr(sig, 'signal_price', None)
         if signal_price is not None and sig.risk_points > 0:
             drift = abs(float(sig.entry_price) - float(signal_price))
-            if drift > 0.5 * sig.risk_points:
+            if drift > 1.0 * sig.risk_points:  # ±1.0R (was 0.5R)
                 cnt = self._drift_log_count.get(symbol, 0) + 1
                 self._drift_log_count[symbol] = cnt
                 if cnt == 1 or cnt % 10 == 0:
                     logger.info(f"{symbol}: Signal drift - entry vs signal {drift:.2f} pts "
-                                f"(> 0.5R = {0.5 * sig.risk_points:.2f}) [x{cnt}]")
+                                f"(> 1.0R = {1.0 * sig.risk_points:.2f}) [x{cnt}]")
                 if cnt == 1:
                     self.edge_guard.record_missed_trade(
                         symbol, f"price_drift_{drift:.1f}pts", sig.entry_price)
                 self._session_recap.setdefault(symbol, {}).update({
                     'signal_found': True, 'signal_dir': sig.direction,
-                    'reason': f'price_drift ({drift:.1f} pts > 0.5R)',
+                    'reason': f'price_drift ({drift:.1f} pts > 1.0R)',
                     'entry_price': sig.entry_price,
                 })
                 return None

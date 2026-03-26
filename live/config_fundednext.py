@@ -71,15 +71,15 @@ FUNDEDNEXT_RULES = {
 # $100k account → $500/trade risk → ~$2k-3k/month target
 # To activate: uncomment FUNDED block below, comment out EVALUATION block.
 #
-# ── EVALUATION (active) ──
-# 2-tier step-down: conservative risk with single step-down
-# Tier 1: 0-4% DD → 1.0% risk (balanced: fast enough to pass, safe enough to survive)
-# Tier 2: 4%+ DD → 0.5% risk (survival mode — need ~12 net losses to breach 10%)
-# Backtested 10yr: 71% pass rate, 7 breaches over 15+ years
+# ── STELLAR-2 CONFIGURATION (0.25% RISK - CONSERVATIVE) ──
+# 2-tier step-down: ultra-conservative capital preservation
+# Tier 1: 0-4% DD → 0.25% risk (capital preservation focus)
+# Tier 2: 4%+ DD → 0.125% risk (survival mode — ultra-tight risk)
+# Locked as of 2026-03-26 for 5-10 trade monitoring period
 ADAPTIVE_RISK = {
     'enabled': True,
-    'default_risk_percent': 1.0,    # Tier 1: DD < 4%
-    'tier2_risk_percent': 0.5,      # Tier 2: DD >= 4%, survival mode
+    'default_risk_percent': 0.25,   # Tier 1: DD < 4% (STELLAR-2: ultra-conservative)
+    'tier2_risk_percent': 0.125,    # Tier 2: DD >= 4%, survival mode
     'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD from initial
     'recovery_threshold': 1.0,      # Restore to tier1 when DD recovers below this offset
 }
@@ -143,14 +143,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 2.0,     # Min SL distance for valid trade
         'max_sl_distance': 25.0,    # Max SL distance (aligned with backtest)
         
-        # ORB strategy params — Universal (anti-curve-fit, aligned with backtest)
+        # ORB strategy params — Backtest-validated (Mar 24 2026 fix: 1.5/0.60/0.10/2h)
         'orb_minutes': 15,
-        'entry_hours': 3,
+        'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.0,
-        'body_min': 0.70,
+        'disp_mult': 1.5,
+        'body_min': 0.60,
         'close_strength': 0.25,
-        'breakout_margin': 0.15,
+        'breakout_margin': 0.10,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 2.0,
         'max_sl_points': 25.0,
@@ -184,14 +184,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 80.0,    # Max SL distance (aligned with backtest)
         
-        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
+        # ORB strategy params — Backtest-validated (Mar 24 2026 fix: 1.5/0.60/0.10/2h)
         'orb_minutes': 15,
-        'entry_hours': 3,
+        'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.0,
-        'body_min': 0.70,
+        'disp_mult': 1.5,
+        'body_min': 0.60,
         'close_strength': 0.25,
-        'breakout_margin': 0.15,
+        'breakout_margin': 0.10,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 80.0,
@@ -268,14 +268,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 10.0,
         'max_sl_distance': 80.0,    # Max SL distance (aligned with backtest)
         
-        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
+        # ORB strategy params — Backtest-validated (Mar 24 2026 fix: 1.5/0.60/0.10/2h)
         'orb_minutes': 15,
-        'entry_hours': 3,
+        'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.0,
-        'body_min': 0.70,
+        'disp_mult': 1.5,
+        'body_min': 0.60,
         'close_strength': 0.25,
-        'breakout_margin': 0.15,
+        'breakout_margin': 0.10,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 10.0,
         'max_sl_points': 80.0,
@@ -308,14 +308,14 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 15.0,    # Aligned with backtest
         'max_sl_distance': 150.0,   # Aligned with backtest
         
-        # ORB strategy params — Universal (anti-curve-fit, aligned with backtest)
+        # ORB strategy params — Backtest-validated (Mar 24 2026 fix: 1.5/0.60/0.10/2h)
         'orb_minutes': 15,
-        'entry_hours': 3,
+        'entry_hours': 2,
         'breakout_window_minutes': 60,
-        'disp_mult': 1.0,
-        'body_min': 0.70,
+        'disp_mult': 1.5,
+        'body_min': 0.60,
         'close_strength': 0.25,
-        'breakout_margin': 0.15,
+        'breakout_margin': 0.10,
         'orb_range_min_mult': 0.5,
         'min_sl_points': 15.0,
         'max_sl_points': 150.0,
@@ -352,7 +352,7 @@ PROFITABLE_INDICES = {
         'min_sl_distance': 2.0,
         'max_sl_distance': 100.0,
         
-        # ORB strategy params — Universal (walk-forward validated, anti-curve-fit)
+        # ORB strategy params — Backtest-validated (original params for US2000)
         'orb_minutes': 15,
         'entry_hours': 3,
         'breakout_window_minutes': 60,

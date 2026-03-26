@@ -102,13 +102,14 @@ def generate_all_signals_with_drift():
                 min_sl_points=cfg.get("min_sl_points", 2.0),
                 max_sl_points=cfg.get("max_sl_points", 25.0),
                 debug=False,
-                orb_minutes=cfg.get("orb_minutes", 15),
+                orb_minutes=cfg.get("orb_minutes_opt", 10),  # OPTIMIZED: 10 (from 15)
                 entry_hours=cfg.get("entry_hours", 3),
                 breakout_window_minutes=cfg.get("breakout_window_minutes", 120),
-                disp_mult=cfg.get("disp_mult", 1.5),
-                body_min=cfg.get("body_min", 0.60),
-                close_strength=cfg.get("close_strength", 0.30),
-                breakout_margin=cfg.get("breakout_margin", 0.10),
+                lookback_ranges=cfg.get("lookback_ranges_opt", 6),  # OPTIMIZED: 6 (new parameter)
+                disp_mult=cfg.get("disp_mult_opt", 1.2),  # OPTIMIZED: 1.2 (from 1.5)
+                body_min=cfg.get("body_min_opt", 0.55),  # OPTIMIZED: 0.55 (from 0.60)
+                close_strength=cfg.get("close_strength_opt", 0.20),  # OPTIMIZED: 0.20 (from 0.30)
+                breakout_margin=cfg.get("breakout_margin_opt", 0.03),  # OPTIMIZED: 0.03 (from 0.10)
                 orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
                 tp3_r=2.5,
                 orb_bias_filter=False,
@@ -229,14 +230,14 @@ def print_year_by_year(results):
     years = sorted(set(r["year"] for r in taken))
     syms = sorted(set(r["symbol"] for r in taken))
 
-    print(f"\n{'═' * 90}")
+    print(f"\n{'=' * 90}")
     print(f"  YEAR-BY-YEAR RESULTS (Drift Guard ±{MAX_DRIFT_R}R + v3.14.1 TP Recalc)")
-    print(f"{'═' * 90}")
+    print(f"{'=' * 90}")
 
     # Portfolio summary per year
     print(f"\n  {'Year':<6} {'Trades':>7} {'Skip':>5} {'WR%':>6} "
-          f"{'TotalR':>8} {'AvgR':>7} {'TP%':>5} {'SL%':>5} {'BE%':>5}")
-    print(f"  {'─' * 78}")
+          f"{'TotalR':>8} {'AvgR':>7} {'PF':>6} {'TP%':>5} {'SL%':>5} {'BE%':>5}")
+    print(f"  {'-' * 84}")
 
     cumulative_r = 0
     for year in years:
@@ -257,17 +258,24 @@ def print_year_by_year(results):
         sl = sum(1 for r in yr_taken if r["exit_reason"] in ("SL_HIT", "SL_BE"))
         be = sum(1 for r in yr_taken if r["exit_reason"] == "SL_BE")
 
+        gross_win = sum(r["pnl_r"] for r in yr_taken if r["pnl_r"] > 0)
+        gross_loss = abs(sum(r["pnl_r"] for r in yr_taken if r["pnl_r"] < 0))
+        pf = gross_win / gross_loss if gross_loss > 0 else float('inf')
+
         print(f"  {year:<6} {n:>7} {yr_skip:>5} {wr:>5.1f}% "
-              f"{total_r:>+8.1f} {avg_r:>+7.3f} {tp/n*100:>4.1f}% {sl/n*100:>4.1f}% {be/n*100:>4.1f}%")
+              f"{total_r:>+8.1f} {avg_r:>+7.3f} {pf:>6.2f} {tp/n*100:>4.1f}% {sl/n*100:>4.1f}% {be/n*100:>4.1f}%")
 
     # Total
     total_n = len(taken)
     total_skip = len(results) - total_n
     total_wins = sum(1 for r in taken if r["win"])
     total_r_all = sum(r["pnl_r"] for r in taken)
-    print(f"  {'─' * 78}")
+    total_gw = sum(r["pnl_r"] for r in taken if r["pnl_r"] > 0)
+    total_gl = abs(sum(r["pnl_r"] for r in taken if r["pnl_r"] < 0))
+    total_pf = total_gw / total_gl if total_gl > 0 else float('inf')
+    print(f"  {'─' * 84}")
     print(f"  {'TOTAL':<6} {total_n:>7} {total_skip:>5} {total_wins/total_n*100:>5.1f}% "
-          f"{total_r_all:>+8.1f} {total_r_all/total_n:>+7.3f}")
+          f"{total_r_all:>+8.1f} {total_r_all/total_n:>+7.3f} {total_pf:>6.2f}")
 
     # Per-symbol per-year matrix
     print(f"\n  TOTAL R PER SYMBOL PER YEAR:")
@@ -308,6 +316,72 @@ def print_year_by_year(results):
         delta = drift_r - ideal_r
         retain = drift_r / ideal_r * 100 if ideal_r != 0 else 0
         print(f"  {year:<6} {ideal_r:>+9.1f} {drift_r:>+9.1f} {delta:>+8.1f} {retain:>7.1f}%")
+
+
+def print_monthly_breakdown(results):
+    """Print monthly P&L heatmap and negative month count."""
+    taken = [r for r in results if r["status"] == "TAKEN"]
+
+    print(f"\n{'═' * 90}")
+    print(f"  MONTHLY P&L (R) — NEGATIVE MONTHS HIGHLIGHTED")
+    print(f"{'═' * 90}")
+
+    # Group by (year, month)
+    monthly = defaultdict(float)
+    monthly_n = defaultdict(int)
+    for r in taken:
+        key = (r["year"], r["date"].month)
+        monthly[key] += r["pnl_r"]
+        monthly_n[key] += 1
+
+    years = sorted(set(r["year"] for r in taken))
+    months = list(range(1, 13))
+    month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    # Header
+    print(f"\n  {'Year':<6}", end="")
+    for ml in month_labels:
+        print(f" {ml:>7}", end="")
+    print(f" {'TOTAL':>8} {'Neg':>4}")
+    print(f"  {'─' * (6 + 8 * 12 + 8 + 5)}")
+
+    total_neg = 0
+    total_months = 0
+    for year in years:
+        print(f"  {year:<6}", end="")
+        yr_total = 0
+        yr_neg = 0
+        for m in months:
+            key = (year, m)
+            if key in monthly:
+                val = monthly[key]
+                yr_total += val
+                total_months += 1
+                if val < 0:
+                    yr_neg += 1
+                    total_neg += 1
+                    print(f" {val:>+6.1f}*", end="")
+                else:
+                    print(f" {val:>+7.1f}", end="")
+            else:
+                print(f" {'---':>7}", end="")
+        print(f" {yr_total:>+8.1f} {yr_neg:>4}")
+
+    print(f"  {'─' * (6 + 8 * 12 + 8 + 5)}")
+    pos_months = total_months - total_neg
+    print(f"\n  Total months traded: {total_months}")
+    print(f"  Positive months:    {pos_months} ({pos_months/total_months*100:.1f}%)")
+    print(f"  Negative months:    {total_neg} ({total_neg/total_months*100:.1f}%)")
+    print(f"  Avg negative months per year: {total_neg/len(years):.1f}")
+
+    # Worst months
+    neg_list = [(k, v) for k, v in monthly.items() if v < 0]
+    if neg_list:
+        neg_list.sort(key=lambda x: x[1])
+        print(f"\n  Worst 5 months:")
+        for (yr, mo), val in neg_list[:5]:
+            print(f"    {yr}-{mo:02d} ({month_labels[mo-1]}): {val:>+6.1f}R  ({monthly_n[(yr,mo)]} trades)")
 
 
 def print_weekly_frequency(results):
@@ -668,7 +742,10 @@ def main():
     # 1. Year-by-year
     print_year_by_year(results)
 
-    # 2. Weekly frequency
+    # 2. Monthly breakdown
+    print_monthly_breakdown(results)
+
+    # 3. Weekly frequency
     print_weekly_frequency(results)
 
     # 3. FundedNext simulation

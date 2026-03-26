@@ -1,0 +1,38 @@
+
+FULL OPTIMIZATION EXECUTION CHECKLIST
+======================================
+
+[  ] STEP 1: Lookback Window Testing (7 combos)
+     - Test values: 5, 6, 8, 10, 12, 15, 20
+     - Track: Entry speed, false positives, trade count
+     - Identify optimal for each index
+     
+[  ] STEP 2: Breakout & Displacement (12 combos)
+     - Use optimal lookback from Step 1
+     - Test: margin={0.02,0.03,0.05,0.07} x disp={1.2,1.3,1.5}
+     - Identify best combo per index
+     
+[  ] STEP 3: Body & Close Filters (16 combos)
+     - Use optimal params from Steps 1-2
+     - Test: body={0.50,0.60,0.70,0.80} x close={0.15,0.20,0.25,0.30}
+     - Fine-tune entry quality
+     
+[  ] STEP 4: Build 4 Final Variants
+     - AGGRESSIVE: lookback=8, breakout=0.02, disp=1.2, body=0.50, close=0.20
+     - BALANCED: lookback=10, breakout=0.05, disp=1.3, body=0.60, close=0.25
+     - CONSERVATIVE: lookback=12, breakout=0.07, disp=1.5, body=0.75, close=0.30
+     - EARLY_SCALP: lookback=6, breakout=0.03, disp=1.2, body=0.55, close=0.20
+     
+[  ] STEP 5: Walk-Forward Validation (10-year)
+     - Test each variant across 3 time periods
+     - Measure robustness & consistency
+     
+[  ] STEP 6: Generate Final Report
+     - Comparison matrix (all variants vs baseline)
+     - Recommendations for live trading
+     - Parameter-by-parameter impact analysis
+     
+[  ] STEP 7: Live Implementation
+     - Apply approved variant to both accounts
+     - Monitor for 2-4 weeks vs backtest expectations
+     - Adjust if real-world performance diverges

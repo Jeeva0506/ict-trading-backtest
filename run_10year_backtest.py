@@ -403,13 +403,14 @@ def generate_all_signals(symbols: list[str]):
                 sl_buffer=cfg["sl_buffer"],
                 min_sl_points=cfg.get("min_sl_points", 2.0),
                 max_sl_points=cfg.get("max_sl_points", 25.0),
-                orb_minutes=cfg.get("orb_minutes", 15),
+                orb_minutes=cfg.get("orb_minutes_opt", 10),  # OPTIMIZED: 10 (from 15)
                 entry_hours=cfg.get("entry_hours", 2),
                 breakout_window_minutes=cfg.get("breakout_window_minutes", 60),
-                disp_mult=cfg.get("disp_mult", 1.3),
-                body_min=cfg.get("body_min", 0.60),
-                close_strength=cfg.get("close_strength", 0.25),
-                breakout_margin=cfg.get("breakout_margin", 0.05),
+                lookback_ranges=cfg.get("lookback_ranges_opt", 6),  # OPTIMIZED: 6 (new parameter)
+                disp_mult=cfg.get("disp_mult_opt", 1.2),  # OPTIMIZED: 1.2 (from 1.3)
+                body_min=cfg.get("body_min_opt", 0.55),  # OPTIMIZED: 0.55 (from 0.60)
+                close_strength=cfg.get("close_strength_opt", 0.20),  # OPTIMIZED: 0.20 (from 0.25)
+                breakout_margin=cfg.get("breakout_margin_opt", 0.03),  # OPTIMIZED: 0.03 (from 0.05)
                 orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
                 tp3_r=2.5,
             )

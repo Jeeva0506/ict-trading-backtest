@@ -1,0 +1,62 @@
+{
+  "VARIANT_A_AGGRESSIVE": {
+    "name": "AGGRESSIVE - More Frequent Entries",
+    "description": "Wider breakout margin, lower body filter, faster entries",
+    "params": {
+      "orb_minutes": 12,
+      "entry_hours": 1.5,
+      "breakout_margin": 0.02,
+      "disp_mult": 1.2,
+      "body_min": 0.5,
+      "close_strength": 0.2,
+      "lookback_ranges": 8,
+      "be_trigger_r": 1.0
+    },
+    "expected_impact": "More trades, potentially lower WR"
+  },
+  "VARIANT_B_BALANCED": {
+    "name": "BALANCED - Current/Optimized",
+    "description": "Medium filters, balanced risk-reward",
+    "params": {
+      "orb_minutes": 15,
+      "entry_hours": 2.0,
+      "breakout_margin": 0.05,
+      "disp_mult": 1.3,
+      "body_min": 0.6,
+      "close_strength": 0.25,
+      "lookback_ranges": 10,
+      "be_trigger_r": 1.0
+    },
+    "expected_impact": "Balanced trades and quality"
+  },
+  "VARIANT_C_CONSERVATIVE": {
+    "name": "CONSERVATIVE - High-Quality Only",
+    "description": "Tight filters, fewer entries, premium quality",
+    "params": {
+      "orb_minutes": 18,
+      "entry_hours": 2.5,
+      "breakout_margin": 0.07,
+      "disp_mult": 1.5,
+      "body_min": 0.75,
+      "close_strength": 0.3,
+      "lookback_ranges": 12,
+      "be_trigger_r": 1.25
+    },
+    "expected_impact": "Fewer trades, higher quality"
+  },
+  "VARIANT_D_EARLY_ENTRY": {
+    "name": "EARLY_ENTRY - Catch Moves Sooner",
+    "description": "Shorter ORB period, faster breakout detection",
+    "params": {
+      "orb_minutes": 10,
+      "entry_hours": 1.0,
+      "breakout_margin": 0.03,
+      "disp_mult": 1.2,
+      "body_min": 0.55,
+      "close_strength": 0.2,
+      "lookback_ranges": 6,
+      "be_trigger_r": 0.75
+    },
+    "expected_impact": "Earlier detection, more chop"
+  }
+}

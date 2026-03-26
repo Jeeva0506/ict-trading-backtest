@@ -1,0 +1,42 @@
+{
+  "VARIANT_A_AGGRESSIVE": {
+    "name": "AGGRESSIVE - Volume Focus",
+    "lookback_ranges": 8,
+    "breakout_margin": 0.02,
+    "disp_mult": 1.2,
+    "body_min": 0.5,
+    "close_strength": 0.2,
+    "orb_minutes": 12,
+    "expected": "Most trades, earliest detection, higher chop"
+  },
+  "VARIANT_B_BALANCED": {
+    "name": "BALANCED - Current Baseline Optimized",
+    "lookback_ranges": 10,
+    "breakout_margin": 0.05,
+    "disp_mult": 1.3,
+    "body_min": 0.6,
+    "close_strength": 0.25,
+    "orb_minutes": 15,
+    "expected": "Good balance of volume & quality"
+  },
+  "VARIANT_C_CONSERVATIVE": {
+    "name": "CONSERVATIVE - Quality Focus",
+    "lookback_ranges": 12,
+    "breakout_margin": 0.07,
+    "disp_mult": 1.5,
+    "body_min": 0.75,
+    "close_strength": 0.3,
+    "orb_minutes": 18,
+    "expected": "Fewest trades, best quality, slight entry delay OK"
+  },
+  "VARIANT_D_EARLY_SCALP": {
+    "name": "EARLY_SCALP - Catch Quick Moves",
+    "lookback_ranges": 6,
+    "breakout_margin": 0.03,
+    "disp_mult": 1.2,
+    "body_min": 0.55,
+    "close_strength": 0.2,
+    "orb_minutes": 10,
+    "expected": "Fastest detection, good for volatile sessions"
+  }
+}
