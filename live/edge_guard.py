@@ -47,6 +47,9 @@ class EdgeGuard:
     def __init__(self, data_dir: Path = None, initial_balance: float = 6000.0):
         if data_dir is None:
             data_dir = Path(__file__).parent / "logs"
+        # Convert to Path if passed as string
+        if isinstance(data_dir, str):
+            data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
         self.data_file = data_dir / "edge_guard.json"
@@ -534,6 +537,20 @@ class EdgeGuard:
             return False, (
                 f"Edge degraded: {'; '.join(self.degradation_reasons)}")
         return True, "ok"
+
+    # ── Live balance refresh (unstick stale DD degradation) ───────────
+    def refresh_balance(self, current_balance: float) -> None:
+        """Re-evaluate edge rules against the latest closed-trade balance.
+        Clears a stale DD degradation when balance has recovered below the
+        soft-stop threshold without a new trade having been recorded."""
+        if current_balance <= 0:
+            return
+        if self.equity_curve:
+            self.equity_curve[-1] = current_balance
+        else:
+            self.equity_curve.append(current_balance)
+        self._evaluate_edge()
+        self._save()
 
     # ── Manual override ────────────────────────────────────────────────
     def force_override(self):

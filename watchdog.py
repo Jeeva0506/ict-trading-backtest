@@ -201,6 +201,7 @@ class TradingWatchdog:
         self._stdout_file = None
         self._stderr_file = None
         self._last_heartbeat = 0  # epoch timestamp of last heartbeat ping
+        self._adopted_pid = None  # PID of a pre-existing bot we adopted (not started by us)
     
     # ------------------------------------------------------------------
     # Bot process management
@@ -263,14 +264,58 @@ class TradingWatchdog:
             self.telegram.send_message(f"❌ <b>BOT START FAILED</b>\n\n{e}")
             return False
     
+    def _try_adopt_existing_bot(self) -> bool:
+        """On fresh watchdog start, adopt a bot that is already running (has a live bot.lock).
+        This prevents the watchdog from double-starting a bot that survived a watchdog crash."""
+        bot_lock = log_dir / 'bot.lock'
+        if not bot_lock.exists():
+            return False
+        try:
+            existing_pid = int(bot_lock.read_text().strip())
+            if psutil.pid_exists(existing_pid):
+                proc = psutil.Process(existing_pid)
+                if 'python' in proc.name().lower():
+                    logger.info(f"Found existing bot PID {existing_pid} — adopting (no restart)")
+                    self._adopted_pid = existing_pid
+                    self.start_time = datetime.now()
+                    return True
+        except Exception as e:
+            logger.warning(f"Bot.lock adoption check failed: {e}")
+        return False
+
     def is_bot_running(self) -> bool:
-        """Check if the bot subprocess is still alive"""
+        """Check if the bot subprocess (or adopted bot process) is still alive."""
+        if self._adopted_pid is not None:
+            if psutil.pid_exists(self._adopted_pid):
+                try:
+                    proc = psutil.Process(self._adopted_pid)
+                    if 'python' in proc.name().lower():
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            # Adopted process has died — fall through to normal subprocess tracking
+            logger.info(f"Adopted bot PID {self._adopted_pid} is no longer alive")
+            self._adopted_pid = None
+            return False
         if self.process is None:
             return False
         return self.process.poll() is None
     
     def kill_bot(self):
-        """Force kill the bot subprocess and all children"""
+        """Force kill the bot subprocess (or adopted bot process) and all children."""
+        if self._adopted_pid is not None:
+            try:
+                proc = psutil.Process(self._adopted_pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            logger.info(f"Adopted bot PID {self._adopted_pid} terminated")
+            self._adopted_pid = None
+            return
         if self.process is None:
             return
         
@@ -492,7 +537,20 @@ class TradingWatchdog:
                 # ── Inside trading window — ensure bot is running ──────
                 if not self.is_bot_running():
                     if bot_was_running or self.process is None:
-                        # Bot was stopped for off-hours (or first start) — start it
+                        # On first iteration (process is None), try to adopt an
+                        # existing bot before starting a new one. This handles the
+                        # case where the watchdog was restarted while the bot is
+                        # still running (e.g., watchdog crash during live session).
+                        if self.process is None and self._try_adopt_existing_bot():
+                            logger.info("Monitoring adopted bot — no new start needed")
+                            bot_was_running = False
+                            self.telegram.send_message(
+                                "🔗 <b>WATCHDOG: Adopted existing bot</b>\n\n"
+                                f"PID {self._adopted_pid} is already running.\n"
+                                "Watchdog is now monitoring it.")
+                            time.sleep(30)
+                            continue
+                        # Bot was stopped for off-hours (or no existing bot) — start fresh
                         logger.info("Trading window active — starting bot")
                         if not self.start_bot():
                             logger.error("Bot start failed. Retrying in 30 seconds...")

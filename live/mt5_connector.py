@@ -168,8 +168,8 @@ class DrawdownProtection:
         return {
             "overall_dd": max(0.0, overall_dd),
             "daily_dd": max(0.0, daily_dd),
-            "is_max_dd_breach": overall_dd >= max_dd_limit,
-            "is_daily_dd_breach": daily_dd >= daily_dd_stop,
+            "is_max_dd_breach": overall_dd > max_dd_limit,
+            "is_daily_dd_breach": daily_dd > daily_dd_stop,
             "can_trade": overall_dd < max_dd_limit and daily_dd < daily_dd_stop,
         }
 
@@ -969,6 +969,7 @@ class LiveTrader:
                             self.journal.close_trade(trade_id, {
                                 'exit_price': details['exit_price'],
                                 'exit_reason': 'EMERGENCY_CMD',
+                                'final_sl': info.get('final_sl', info.get('sl_init', 0)),
                                 'pnl': pnl,
                                 'pnl_percent': round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
                                 'pnl_points': round(pnl_pts, 2),
@@ -1121,7 +1122,7 @@ class LiveTrader:
 
                         if self._no_trade_streak >= 7:
                             self.telegram.send_message(
-                                f"\U0001f6a8 <b>NO TRADES FOR {self._no_trade_streak} TRADING DAYS</b>\n\n"
+                                f"NO TRADES FOR {self._no_trade_streak} TRADING DAYS\n\n"
                                 f"Last trade: {self._last_trade_date or 'never'}\n"
                                 f"Strategy filters may be too strict.\n"
                                 f"Please review missed signals.")
@@ -1155,7 +1156,7 @@ class LiveTrader:
         # Check internet first
         if not _internet_ok():
             logger.warning("No internet - waiting...")
-            self.telegram.send_message("<b>No Internet</b>\nWaiting for connection...")
+            self.telegram.send_message("NO INTERNET - Waiting for connection...")
             for wait in (10, 20, 30, 60, 60):
                 time.sleep(wait)
                 if _internet_ok():
@@ -1192,7 +1193,7 @@ class LiveTrader:
             info = self.tracked_positions.pop(ticket)
             logger.warning(f"Position {ticket} ({info['symbol']}) closed during disconnect")
             self.telegram.send_message(
-                f"<b>Position Closed During Disconnect</b>\n"
+                f"Position Closed During Disconnect\n"
                 f"Ticket: {ticket}\nSymbol: {info['symbol']}")
 
         # Verify SL exists on surviving positions (SL stripped = broker issue)
@@ -1500,12 +1501,18 @@ class LiveTrader:
         if self.dd_protection:
             account = self.mt5.get_account_info()
             if account:
-                dd = self.dd_protection.update(
-                    account.get("equity", account.get("balance", 0))
-                )
+                # FundedNext trailing DD is measured from balance (closed P&L),
+                # not equity (open floating). Using equity gives false readings
+                # during open losing positions.
+                balance = account.get("balance", 0)
+                dd = self.dd_protection.update(balance)
                 if not dd["can_trade"]:
                     return False, (f"DD limit (overall={dd['overall_dd']:.1f}%, "
                                    f"daily={dd['daily_dd']:.1f}%)")
+                # Refresh EdgeGuard with current balance so stale degradation
+                # (from a previous session's DD spike that has since recovered)
+                # is re-evaluated against today's actual balance.
+                self.edge_guard.refresh_balance(balance)
         # Edge guard check (rolling metrics + hard rules)
         eg_can, eg_reason = self.edge_guard.can_trade()
         if not eg_can:
@@ -1549,6 +1556,10 @@ class LiveTrader:
         balance = account["balance"]
         free_margin = account["free_margin"]
         risk_pct = self.dd_protection.get_adaptive_risk(balance)
+        
+        # BUG FIX (May 2026): Initialize actual_risk_amount early to prevent 
+        # UnboundLocalError if error handling paths are triggered before line 1895
+        actual_risk_amount = 0.0
 
         # C3 FIX: Sync adaptive risk to SL protection emergency threshold
         sl_update_risk(risk_pct / 100)
@@ -1568,8 +1579,7 @@ class LiveTrader:
                 symbol, f"min_R_{sig['risk_points']:.1f}pts",
                 sig.get('entry_price', 0))
             self.telegram.send_message(
-                f"⚠️ {symbol}: Trade skipped — R={sig['risk_points']:.1f} pts "
-                f"too small (min {MIN_R_POINTS} pts)")
+                f"[{symbol}] Trade skipped - R={sig['risk_points']:.1f} pts too small (min {MIN_R_POINTS} pts)")
             self._session_recap.setdefault(symbol, {}).update({
                 'signal_found': True, 'signal_dir': sig.get('direction', ''),
                 'reason': f'min_R ({sig["risk_points"]:.1f} pts < {MIN_R_POINTS})',
@@ -1645,18 +1655,20 @@ class LiveTrader:
                 _drift_key = f"drift_{symbol}"
                 if not self._block_notify_sent.get(_drift_key):
                     self.telegram.send_message(
-                        f"⚠️ {symbol}: Trade skipped — price drifted {drift_r:.2f}R "
-                        f"({drift_from_signal:.1f} pts) from signal. Max {MAX_DRIFT_R}R.")
+                        f"[{symbol}] Trade skipped - price drifted {drift_r:.2f}R ({drift_from_signal:.1f} pts) from signal. Max {MAX_DRIFT_R}R.")
                     self._block_notify_sent[_drift_key] = datetime.now()
                 self._session_recap.setdefault(symbol, {}).update({
                     'signal_found': True, 'signal_dir': sig.get('direction', ''),
                     'reason': f'drift_guard ({drift_r:.2f}R > {MAX_DRIFT_R}R)',
                     'entry_price': sig.get('entry_price', 0),
                 })
-                # v3.14.3: Mark trade as taken to STOP RETRY LOOP
-                # The signal entry is fixed; price won't improve. Without this,
-                # the bot retries every ~6s generating 10+ rejections/minute.
-                self.trade_taken_today[symbol] = True
+                # BUG FIX (May 2026): Do NOT set trade_taken_today=True here.
+                # Reason: This permanently blocks the symbol for the entire day,
+                # preventing any trades even on NEW signals. The permanent block
+                # was too aggressive. Since the signal entry price doesn't change,
+                # the same stale signal will naturally fail the drift check again
+                # anyway (price won't move back to stale entry level).
+                # Allow NEW signals to be attempted without blocking the symbol.
                 return
             elif drift_r > 0.25:
                 logger.info(
@@ -1691,16 +1703,18 @@ class LiveTrader:
                 _spread_key = f"spread_{symbol}"
                 if not self._block_notify_sent.get(_spread_key):
                     self.telegram.send_message(
-                        f"⚠️ {symbol}: Trade skipped — spread {spread_points:.1f} pts "
-                        f"= {spread_r_ratio:.0%} of R (max {MAX_SPREAD_R_PCT:.0%})")
+                        f"[{symbol}] Trade skipped - spread {spread_points:.1f} pts = {spread_r_ratio:.0%} of R (max {MAX_SPREAD_R_PCT:.0%})")
                     self._block_notify_sent[_spread_key] = datetime.now()
                 self._session_recap.setdefault(symbol, {}).update({
                     'signal_found': True, 'signal_dir': sig.get('direction', ''),
                     'reason': f'spread_guard ({spread_r_ratio:.0%} of R)',
                     'entry_price': sig.get('entry_price', 0),
                 })
-                # v3.14.3: Mark trade as taken to stop retry (spread won't improve mid-session)
-                self.trade_taken_today[symbol] = True
+                # BUG FIX (May 2026): Do NOT set trade_taken_today=True here.
+                # Reason: This permanently blocks the symbol for the entire day,
+                # preventing any trades even on NEW signals. Spread CAN improve
+                # during the session (liquidity changes, market volatility changes).
+                # Allow NEW signals to be attempted without blocking the symbol.
                 return
 
         # ── TP RECALCULATION FROM LIVE PRICE (v3.14.1) ────────────────
@@ -1860,6 +1874,7 @@ class LiveTrader:
             "direction": sig["direction"],
             "entry": fill_price,
             "sl_init": sig["stop_loss"],
+            "final_sl": sig["stop_loss"],  # Track actual SL at exit for validation
             "tp": sig["tp"],
             "R": live_risk_points,
             "position_id": position_id,
@@ -1988,8 +2003,22 @@ class LiveTrader:
                 exit_price = details['exit_price']
                 exit_reason = details['exit_reason']
 
+                # ── Sanity-check exit price from deal history ──────────────
+                # If exit_price is impossibly far from entry (e.g. corrupted deal
+                # history returning a price from a different position), discard it
+                # and force recomputation from final_sl / balance.
+                _entry_chk = info.get('entry', 0)
+                _R_chk = info.get('R', 0) or 0
+                if (exit_price and _entry_chk and _R_chk
+                        and abs(exit_price - _entry_chk) > _R_chk * 5):
+                    logger.warning(f"Exit price {exit_price} is "
+                                   f"{abs(exit_price - _entry_chk):.1f} pts from entry "
+                                   f"(>{_R_chk * 5:.1f} pts / 5R) — treating as corrupted")
+                    exit_price = 0
+                    pnl = 0.0
+
                 # ── Symbol mismatch fallback: compute PnL from position data ──
-                if details.get('symbol_mismatch'):
+                if details.get('symbol_mismatch') or (exit_price == 0 and pnl == 0.0):
                     try:
                         # Method 1: balance delta using pre-manage snapshot
                         ref_balance = getattr(self, '_pre_manage_balance', self.state.current_balance)
@@ -2000,43 +2029,61 @@ class LiveTrader:
                             logger.info(f"Symbol mismatch fallback: balance ${ref_balance:.2f} -> "
                                         f"${new_balance:.2f}, PnL=${pnl:.2f}")
 
-                        # Method 2: if balance delta is zero (race condition),
-                        # compute expected PnL from tracked position SL/TP + point value
+                        # Method 2: if balance delta is zero (race condition — balance was
+                        # already updated before our snapshot), compute PnL from final_sl.
+                        # final_sl tracks the trail SL, so this correctly handles the case
+                        # where a trailing stop fired above entry (giving a positive PnL).
                         sl = info.get('sl_init', 0)
                         tp = info.get('tp', 0)
                         entry = info.get('entry', 0)
                         lots = info.get('volume', 0)
                         direction = info.get('direction', '')
+                        # Use final_sl (trail SL) if available, else original sl_init
+                        final_sl_val = info.get('final_sl', sl)
 
                         if pnl == 0.0 and entry and lots:
                             pv = self._get_point_value(symbol)
-                            if direction == 'sell':
-                                sl_pnl = round((entry - sl) * lots * pv, 2)  # negative
-                                tp_pnl = round((entry - tp) * lots * pv, 2)  # positive
-                            else:
-                                sl_pnl = round((sl - entry) * lots * pv, 2)  # negative
-                                tp_pnl = round((tp - entry) * lots * pv, 2)  # positive
-                            # Use whichever is closer to actual balance change
                             if acct:
                                 actual_balance = acct.balance
                                 bal_delta = actual_balance - ref_balance
-                                # If balance dropped, it's SL; if rose, it's TP
-                                if bal_delta < -1.0:  # noticeable loss
-                                    pnl = sl_pnl
-                                    logger.info(f"PnL computed from SL: entry={entry}, SL={sl}, "
-                                                f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
-                                elif bal_delta > 1.0:  # noticeable gain
-                                    pnl = tp_pnl
-                                    logger.info(f"PnL computed from TP: entry={entry}, TP={tp}, "
-                                                f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
-                                else:
-                                    # Truly zero or near-zero — use SL as worst case
-                                    pnl = sl_pnl
-                                    logger.warning(f"Balance delta ~$0 — defaulting to SL PnL=${pnl:.2f}")
+                            else:
+                                bal_delta = 0
 
+                            if bal_delta < -1.0:  # noticeable loss
+                                if direction == 'sell':
+                                    pnl = round((entry - final_sl_val) * lots * pv, 2)
+                                else:
+                                    pnl = round((final_sl_val - entry) * lots * pv, 2)
+                                logger.info(f"PnL computed from final_sl (loss): "
+                                            f"entry={entry}, final_sl={final_sl_val}, "
+                                            f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
+                            elif bal_delta > 1.0:  # noticeable gain
+                                if direction == 'sell':
+                                    pnl = round((entry - final_sl_val) * lots * pv, 2)
+                                else:
+                                    pnl = round((final_sl_val - entry) * lots * pv, 2)
+                                logger.info(f"PnL computed from final_sl (gain): "
+                                            f"entry={entry}, final_sl={final_sl_val}, "
+                                            f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
+                            else:
+                                # Balance delta ~$0: race condition — balance updated before
+                                # our snapshot. Use final_sl to compute the actual PnL.
+                                if direction == 'sell':
+                                    pnl = round((entry - final_sl_val) * lots * pv, 2)
+                                else:
+                                    pnl = round((final_sl_val - entry) * lots * pv, 2)
+                                logger.warning(f"Balance delta ~$0 (race condition) — "
+                                               f"PnL from final_sl={final_sl_val}: ${pnl:.2f}")
+
+                        # Assign exit price and reason using final_sl
+                        hit_be = info.get('hit_be', False)
+                        trailed = final_sl_val and sl and abs(final_sl_val - sl) > 0.01
                         if pnl < 0:
-                            exit_price = sl
+                            exit_price = final_sl_val or sl
                             exit_reason = 'SL_HIT'
+                        elif hit_be and trailed:
+                            exit_price = final_sl_val
+                            exit_reason = 'TRAIL_SL'
                         else:
                             exit_price = tp
                             exit_reason = 'TP'
@@ -2090,6 +2137,7 @@ class LiveTrader:
                     self.journal.close_trade(trade_id, {
                         "exit_price": exit_price,
                         "exit_reason": exit_reason,
+                        "final_sl": info.get("final_sl", info.get("sl_init", 0)),
                         "pnl": pnl,
                         "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
                         "pnl_points": round(pnl_pts, 2),
@@ -2135,8 +2183,7 @@ class LiveTrader:
                 if hasattr(self.edge_guard, '_level1_audit_report') and self.edge_guard._level1_audit_report:
                     audit_text = self.edge_guard._level1_audit_report
                     self.telegram.send_message(
-                        f"📋 <b>LEVEL 1 EXECUTION AUDIT</b>\n\n"
-                        f"<pre>{audit_text[:3800]}</pre>")
+                        f"LEVEL 1 EXECUTION AUDIT\n\n{audit_text[:3800]}")
                     self.edge_guard._level1_audit_report = None
 
                 self.telegram.trade_closed(
@@ -2232,6 +2279,7 @@ class LiveTrader:
                             self.journal.close_trade(trade_id, {
                                 "exit_price": _fc_exit_price,
                                 "exit_reason": "SESSION_CLOSE",
+                                "final_sl": info.get("final_sl", info.get("sl_init", 0)),
                                 "pnl": pnl,
                                 "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
                                 "pnl_points": round(pnl_pts, 2),
@@ -2317,6 +2365,7 @@ class LiveTrader:
                 if ok:
                     info["hit_be"] = True
                     info["max_favorable"] = unrealized_r
+                    info["final_sl"] = new_sl  # Track actual SL for exit validation
                     sl_track_original_sl(ticket, new_sl)  # sync SL tracker
                     logger.info(f"BE triggered on {ticket} ({symbol}): SL -> {new_sl:.2f}")
                     self.telegram.sl_moved(symbol, current_sl, new_sl, "breakeven")
@@ -2332,6 +2381,7 @@ class LiveTrader:
                     if trail_sl > current_sl + 0.01:
                         ok = self.mt5.modify_position(ticket, sl=trail_sl)
                         if ok:
+                            info["final_sl"] = trail_sl  # Track actual SL for exit validation
                             sl_track_original_sl(ticket, trail_sl)  # sync SL tracker
                             logger.info(f"Trail SL on {ticket} ({symbol}): "
                                         f"{current_sl:.2f} -> {trail_sl:.2f} "
@@ -2341,6 +2391,7 @@ class LiveTrader:
                     if trail_sl < current_sl - 0.01:
                         ok = self.mt5.modify_position(ticket, sl=trail_sl)
                         if ok:
+                            info["final_sl"] = trail_sl  # Track actual SL for exit validation
                             sl_track_original_sl(ticket, trail_sl)  # sync SL tracker
                             logger.info(f"Trail SL on {ticket} ({symbol}): "
                                         f"{current_sl:.2f} -> {trail_sl:.2f} "
@@ -2389,6 +2440,7 @@ class LiveTrader:
                     self.journal.close_trade(trade_id, {
                         "exit_price": exit_price,
                         "exit_reason": exit_reason,
+                        "final_sl": info.get("final_sl", info.get("sl_init", 0)),
                         "pnl": pnl,
                         "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
                         "pnl_points": round(pnl_pts, 2),
@@ -2401,16 +2453,16 @@ class LiveTrader:
 
                 # Send Telegram correction
                 self.telegram.send_message(
-                    f"<b>P&L Correction</b> ({symbol})\n"
+                    f"P&L Correction ({symbol})\n"
                     f"Ticket: {ticket}\n"
                     f"Exit: {exit_reason} @ {exit_price}\n"
-                    f"P&L: <b>${pnl:+.2f}</b>"
+                    f"P&L: ${pnl:+.2f}"
                 )
             else:
                 logger.error(f"Deferred re-query FAILED for {ticket} ({symbol}) "
                              f"- P&L will remain $0 in journal. Check MT5 manually.")
                 self.telegram.send_message(
-                    f"⚠️ <b>P&L Recording Failed</b>\n"
+                    f"P&L Recording Failed\n"
                     f"{symbol} ticket {ticket}\n"
                     f"Deal history unavailable. Check MT5 manually."
                 )
@@ -2431,15 +2483,15 @@ class LiveTrader:
 
     def _get_closed_trade_details(self, ticket: int, expected_symbol: str = None) -> dict:
         """Query MT5 deal history for full exit details: PnL, exit_price, exit_reason.
-        Retries up to 6 times with 1.0s delay (total ~6s wait) since deals
-        may not appear immediately after close on some brokers.
+        Retries up to 12 times with exponential backoff (1,2,3,5,5,5... seconds) (total ~45s wait)
+        since deals may not appear immediately after close on some brokers (especially at market close).
         Uses 7-day lookback window to handle weekend rollover."""
         result = {'pnl': 0.0, 'exit_price': 0, 'exit_reason': 'Unknown'}
         try:
             from datetime import timezone
             now = datetime.now(timezone.utc)
             start = now - timedelta(days=7)  # wider window for weekend rollover
-            for attempt in range(6):
+            for attempt in range(12):  # FIX (May 4): Increased from 6 to 12 attempts
                 deals = mt5.history_deals_get(start, now, position=ticket)
                 if deals:
                     # Sanity check: verify deals belong to the expected symbol
@@ -2520,8 +2572,11 @@ class LiveTrader:
                     if attempt > 0:
                         logger.info(f"Deal history for {ticket} found on attempt {attempt+1}")
                     return result
-                time.sleep(1.0)
-            logger.warning(f"No deals found for ticket {ticket} after 6 attempts")
+                # FIX (May 4): Exponential backoff instead of fixed 1s
+                # 1s → 2s → 3s → 5s → 5s... (total max ~45s vs old 6s)
+                wait_time = min(5.0, 1.0 + attempt * 0.5)  # 1, 1.5, 2, 2.5, 3, 3.5, ... capped at 5
+                time.sleep(wait_time)
+            logger.warning(f"No deals found for ticket {ticket} after 12 attempts (45s wait)")
         except Exception as e:
             logger.error(f"Failed to query deal history for {ticket}: {e}")
         return result
@@ -2612,11 +2667,11 @@ class LiveTrader:
             bal = f"${account['balance']:,.2f}" if account else "N/A"
 
             msg = (
-                f"\U0001f4cb <b>SESSION RECAP</b>\n\n"
+                f"SESSION RECAP\n\n"
                 + "\n\n".join(lines)
-                + f"\n\n\U0001f4b0 Balance: {bal}"
-                + f"\n\U0001f4c5 Daily P&L: ${self.state.daily_pnl:+.2f}"
-                + f"\n\u23f0 {ist_time()}"
+                + f"\nBalance: {bal}"
+                + f"\nDaily P&L: ${self.state.daily_pnl:+.2f}"
+                + f"\nTime: {ist_time()}"
             )
             self.telegram.send_message(msg)
             # Mark as sent to prevent duplicate recaps
@@ -2655,6 +2710,7 @@ class LiveTrader:
                     self.journal.close_trade(trade_id, {
                         "exit_price": details['exit_price'],
                         "exit_reason": f"EMERGENCY: {reason}",
+                        "final_sl": info.get("final_sl", info.get("sl_init", 0)),
                         "pnl": pnl,
                         "pnl_percent": round(pnl / self.state.current_balance * 100, 3) if self.state.current_balance else 0,
                         "pnl_points": round(pnl_pts, 2),
@@ -2763,15 +2819,24 @@ class LiveTrader:
                         if reason not in ("market closed", "already traded today",
                                           "trading disabled", "trading paused",
                                           "daily limit hit", "SL protection pause"):
-                            block_key = f"{symbol}_{reason}"
+                            # BUG FIX (May 2026): Use simplified block_key for edge guard
+                            # degradation notifications. Previously, the full reason string
+                            # (with dynamic metrics) was used as the key, causing the key
+                            # to change every check (e.g., "PF=0.99 < 1.2" → "PF=0.98 < 1.2"),
+                            # breaking the 86400s throttle. Result: dozens of duplicate
+                            # notifications per day when edge degrades.
+                            if reason.startswith("Edge degraded:"):
+                                block_key = f"{symbol}_edge_degraded"
+                            else:
+                                block_key = f"{symbol}_{reason}"
                             last_t = self._block_notify_sent.get(block_key)
                             # v3.14.3: Throttle block notifications to ONCE PER DAY per key
                             # (was 600s = 10min, generated 6+ messages/hour per symbol)
                             if last_t is None or (datetime.now() - last_t).total_seconds() > 86400:
                                 self.telegram.send_message(
-                                    f"\u26a0\ufe0f <b>Trade Blocked — {symbol}</b>\n\n"
-                                    f"<b>Reason:</b> {reason}\n"
-                                    f"\u23f0 {ist_time()}")
+                                    f"Trade Blocked - {symbol}\n\n"
+                                    f"Reason: {reason}\n"
+                                    f"Time: {ist_time()}")
                                 self._block_notify_sent[block_key] = datetime.now()
                         continue
 
