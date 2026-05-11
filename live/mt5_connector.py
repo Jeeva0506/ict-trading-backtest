@@ -50,6 +50,7 @@ from config_fundednext import (
     TELEGRAM_CHAT_ID,
     ACCOUNT_LABEL,
     MT5_PATH,
+    EDGE_GUARD_ENABLED,
 )
 from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
@@ -1067,7 +1068,8 @@ class LiveTrader:
                 min_sl_points=cfg.get("min_sl_points", 2.0),
                 max_sl_points=cfg.get("max_sl_points", 80.0),  # Aligned with backtest
                 tp3_r=2.5,
-                tp1_r=1.0,
+                tp1_r=1.0,              # v3.14.6: reverted 0.75 → 1.0 (10yr data: BE=1.0R TRAIL=0.5R PF=1.09 vs 1.01)
+                trail_buffer_r=0.5,     # v3.14.6: reverted 1.0 → 0.5 (10yr validation: current config wins on all metrics)
                 orb_bias_filter=False,  # v3.14.0: HTF-only mode (15yr A/B validated, +62% total R)
                 debug=True,   # Enable detection logging for live diagnostics
             )
@@ -1513,10 +1515,11 @@ class LiveTrader:
                 # (from a previous session's DD spike that has since recovered)
                 # is re-evaluated against today's actual balance.
                 self.edge_guard.refresh_balance(balance)
-        # Edge guard check (rolling metrics + hard rules)
-        eg_can, eg_reason = self.edge_guard.can_trade()
-        if not eg_can:
-            return False, eg_reason
+        # Edge guard check (rolling metrics + hard rules) — can be disabled per account
+        if EDGE_GUARD_ENABLED:
+            eg_can, eg_reason = self.edge_guard.can_trade()
+            if not eg_can:
+                return False, eg_reason
         # Max open positions across ALL symbols (aligned with backtest MAX_OPEN_POSITIONS=2)
         max_open = FUNDEDNEXT_RULES.get('max_open_positions', 2)
         all_positions = self.mt5.get_open_positions()
@@ -1621,6 +1624,24 @@ class LiveTrader:
                 logger.info(
                     f"{symbol}: LOT SIZING R adjusted — signal_R={sig['risk_points']:.2f} → "
                     f"live_R={live_risk_points:.2f} ({r_drift_pct:+.0%})")
+
+        # ── LIVE R MINIMUM GUARD ──────────────────────────────────────
+        # After drift, live_R may be far smaller than signal_R (entry moved
+        # close to SL). Reject if live_R < per-symbol minimum so we don't
+        # trade with a SL that's nearly touching price.
+        if live_risk_points < MIN_R_POINTS:
+            logger.warning(
+                f"{symbol}: LIVE R TOO SMALL — live_R={live_risk_points:.2f} pts < "
+                f"{MIN_R_POINTS} minimum (signal_R={sig['risk_points']:.2f} was OK but "
+                f"price drifted close to SL). Trade REJECTED.")
+            self.edge_guard.record_missed_trade(
+                symbol, f"live_R_too_small_{live_risk_points:.1f}pts",
+                sig.get('entry_price', 0))
+            self.telegram.send_message(
+                f"[{symbol}] Trade skipped — live R={live_risk_points:.1f} pts too small "
+                f"after drift (min {MIN_R_POINTS} pts). SL too close to entry.")
+            self.trade_taken_today[symbol] = True
+            return
 
         # Position sizing with live broker data — use LIVE R for accurate risk
         sizing = calculate_position_size_with_broker_data(
@@ -2049,8 +2070,10 @@ class LiveTrader:
                             else:
                                 bal_delta = 0
 
+                            # Direction stored as 'bullish'/'bearish' — match both forms.
+                            is_sell = direction in ('sell', 'bearish')
                             if bal_delta < -1.0:  # noticeable loss
-                                if direction == 'sell':
+                                if is_sell:
                                     pnl = round((entry - final_sl_val) * lots * pv, 2)
                                 else:
                                     pnl = round((final_sl_val - entry) * lots * pv, 2)
@@ -2058,7 +2081,7 @@ class LiveTrader:
                                             f"entry={entry}, final_sl={final_sl_val}, "
                                             f"lots={lots}, pv={pv:.2f}, PnL=${pnl:.2f}")
                             elif bal_delta > 1.0:  # noticeable gain
-                                if direction == 'sell':
+                                if is_sell:
                                     pnl = round((entry - final_sl_val) * lots * pv, 2)
                                 else:
                                     pnl = round((final_sl_val - entry) * lots * pv, 2)
@@ -2068,7 +2091,7 @@ class LiveTrader:
                             else:
                                 # Balance delta ~$0: race condition — balance updated before
                                 # our snapshot. Use final_sl to compute the actual PnL.
-                                if direction == 'sell':
+                                if is_sell:
                                     pnl = round((entry - final_sl_val) * lots * pv, 2)
                                 else:
                                     pnl = round((final_sl_val - entry) * lots * pv, 2)
@@ -2767,6 +2790,14 @@ class LiveTrader:
                 except Exception as e:
                     logger.warning(f"Report scheduler error: {e}")
 
+                # ── Snapshot balance BEFORE balance update from MT5 ───
+                # Must happen before get_account_info() updates state.current_balance.
+                # When TP/SL fires, MT5 reflects the new balance immediately. If we
+                # snapshot AFTER the update, ref_balance == new_balance → delta=0 →
+                # fallback computes PnL from final_sl (wrong sign for TP hits).
+                # Snapshotting BEFORE gives us the pre-close balance → correct delta.
+                self._pre_manage_balance = self.state.current_balance
+
                 # ── Account + DD check ─────────────────────────────────
                 account = self.mt5.get_account_info()
                 if account:
@@ -2852,11 +2883,6 @@ class LiveTrader:
                                          f"R={sig['risk_points']:.2f}")
                         self._execute_signal(symbol, sig)
                     # else: no valid ORB breakout this cycle — silent, normal
-
-                # ── Snapshot balance BEFORE position management ────────
-                # Needed for symbol-mismatch fallback: balance delta must compare
-                # pre-close balance vs post-close balance to compute PnL correctly.
-                self._pre_manage_balance = self.state.current_balance
 
                 # ── Position management (BE, trail, session close) ─────
                 self._manage_positions()
