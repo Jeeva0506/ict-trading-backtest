@@ -1763,11 +1763,18 @@ class LiveTrader:
 
         # ── ROUND SL/TP/LOTS to broker tick precision ──────────────
         # Eliminates floating-point noise (e.g. 6700.015000000001 → 6700.02)
+        # Also aligns TP to trade_tick_size to prevent INVALID_STOPS rejection
+        # when broker tick grid is coarser than digit precision (e.g. DAX tick=0.5, digits=1)
         sym_info_round = mt5.symbol_info(symbol)
         if sym_info_round and sym_info_round.digits >= 0:
             _digits = sym_info_round.digits
+            _tick = getattr(sym_info_round, 'trade_tick_size', 0) or 0
             sig["stop_loss"] = round(sig["stop_loss"], _digits)
-            sig["tp"] = round(sig["tp"], _digits)
+            # Align TP to nearest valid tick before placing order
+            _raw_tp = sig["tp"]
+            if _tick > 0:
+                _raw_tp = round(_raw_tp / _tick) * _tick
+            sig["tp"] = round(_raw_tp, _digits)
             sig["entry_price"] = round(sig["entry_price"], _digits)
 
         t_order_start = time.perf_counter()
@@ -1866,21 +1873,52 @@ class LiveTrader:
                 final_tp = fill_price + fill_R * _tp_r
             else:
                 final_tp = fill_price - fill_R * _tp_r
-            # Round to broker digits
+            # Round to broker digits + tick_size (v3.14.7: prevent INVALID_STOPS)
             _rd = sym_info_round.digits if (sym_info_round and hasattr(sym_info_round, 'digits') and sym_info_round.digits >= 0) else 2
+            _tk = (getattr(sym_info_round, 'trade_tick_size', 0) or 0) if sym_info_round else 0
+            if _tk > 0:
+                final_tp = round(final_tp / _tk) * _tk
             final_tp = round(final_tp, _rd)
             if abs(final_tp - sig["tp"]) > 0.01:
-                ok = self.mt5.modify_position(ticket, tp=final_tp)
+                # v3.14.7: use position_id (not order ticket) — they differ on FundedNext IOC fills
+                ok = self.mt5.modify_position(position_id, tp=final_tp)
                 if ok:
                     logger.info(
                         f"{symbol}: TP fine-tuned from fill — "
                         f"{sig['tp']:.2f} → {final_tp:.2f} "
                         f"(fill={fill_price}, fill_R={fill_R:.2f})")
                 else:
-                    logger.warning(f"{symbol}: Failed to fine-tune TP from fill price")
+                    logger.warning(f"{symbol}: Failed to fine-tune TP from fill price (pos={position_id})")
             sig["tp"] = final_tp
             # Use fill-based R for tracked_positions (matches backtest: R = |entry - SL|)
             live_risk_points = fill_R
+
+        # ── POST-FILL TP VERIFICATION (v3.14.7) ──────────────────────────────
+        # Confirm broker actually stored the TP. IOC orders can strip SL/TP on
+        # some brokers, making the fine-tune modify the only TP-set mechanism.
+        # If that modify was rejected (invalid price, wrong ticket), TP stays at 0
+        # and the trade never closes automatically. Force-set if mismatch found.
+        time.sleep(0.3)
+        _pos_verify = mt5.positions_get(ticket=position_id)
+        if _pos_verify:
+            _broker_tp = _pos_verify[0].tp
+            _expected_tp = sig["tp"]
+            if _broker_tp == 0 or abs(_broker_tp - _expected_tp) > 0.5:
+                _fix_ok = self.mt5.modify_position(position_id, tp=_expected_tp)
+                if _fix_ok:
+                    logger.warning(
+                        f"{symbol}: TP mismatch — broker={_broker_tp:.2f}, "
+                        f"expected={_expected_tp:.2f} — force-set OK")
+                else:
+                    logger.error(
+                        f"{symbol}: TP force-set FAILED — broker={_broker_tp:.2f}, "
+                        f"expected={_expected_tp:.2f} — trade will NOT auto-close!")
+                    self.telegram.critical_alert(
+                        "TP SET FAILED",
+                        f"{symbol}: Broker TP={_broker_tp:.2f}, expected {_expected_tp:.2f}\n"
+                        f"Trade will not close automatically at TP!")
+        else:
+            logger.warning(f"{symbol}: TP verify — position {position_id} not found for broker check")
 
         # F2 FIX: Track position and mark trade taken BEFORE SL verification.
         # This prevents re-entry loops if SL verification fails and emergency-closes,
