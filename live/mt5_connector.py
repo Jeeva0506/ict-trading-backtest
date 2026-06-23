@@ -2487,30 +2487,24 @@ class LiveTrader:
                 import pytz
                 force_close_triggered = False
                 try:
-                    # Dynamic force-close: convert market's local close time
-                    # to UTC, then compare with current UTC. DST-proof.
+                    # Use server-time force-close to match session boundaries
+                    # and avoid DST-mismatch bugs between US/EU clocks.
                     from datetime import timezone as _fctz, timedelta as _fctd
                     _fc_offset = self._get_broker_utc_offset()
                     _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
-                    utc_now = datetime.now(pytz.UTC)
-                    broker_now = utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
-                    today = broker_now.date()
+                    _fc_utc_now = datetime.now(pytz.UTC)
+                    local_now = _fc_utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
+                    now_min = local_now.hour * 60 + local_now.minute
 
-                    if config.get('timezone'):
-                        # Dynamic path: convert market close from local tz to broker tz
-                        local_tz = pytz.timezone(config['timezone'])
-                        local_close = local_tz.localize(datetime(
-                            today.year, today.month, today.day,
-                            config['market_close_hour'],
-                            config.get('market_close_minute', 0)))
-                        broker_close = local_close.astimezone(_fc_broker_tz).replace(tzinfo=None)
-                        close_min = broker_close.hour * 60 + broker_close.minute
-                    else:
-                        # Fallback: static mt5 hours
-                        close_min = config.get("mt5_close_hour", 23) * 60 + config.get("mt5_close_minute", 0)
-
-                    force_min = close_min - 15
-                    now_min = broker_now.hour * 60 + broker_now.minute
+                    # Use mt5_ hours (fixed server time, DST-immune)
+                    force_h = config.get("force_close_hour", config["market_close_hour"])
+                    force_m = config.get("force_close_minute", config.get("market_close_minute", 0))
+                    # Convert force_close from local market tz to server tz
+                    # by using the mt5_close as anchor and offset back 15 min
+                    mt5_close_h = config.get("mt5_close_hour", 23)
+                    mt5_close_m = config.get("mt5_close_minute", 0)
+                    force_min = mt5_close_h * 60 + mt5_close_m - 15  # 15 min before session end
+                    close_min = mt5_close_h * 60 + mt5_close_m
 
                     if force_min <= now_min < close_min:
                         force_close_triggered = True
