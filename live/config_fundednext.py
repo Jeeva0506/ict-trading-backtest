@@ -58,40 +58,64 @@ FUNDEDNEXT_RULES = {
 }
 
 # ============================================================================
-# ADAPTIVE RISK STRATEGY
+# ATR SL CONFIGURATION
 # ============================================================================
-# Two profiles: Evaluation (aggressive to pass fast) and Funded (conservative to survive)
+ATR_SL_ENABLED = False              # Disabled - using fixed buffers instead
+
+# ============================================================================
+# EDGE GUARD CONFIGURATION (default enabled for most accounts)
+# ============================================================================
+EDGE_GUARD_ENABLED = False          # Disabled — trading freely without edge guard
+
+# ============================================================================
+# ADAPTIVE RISK STRATEGY - ACCOUNT SPECIFIC
+# ============================================================================
+# STELLAR-15K (Primary account on FundedNext-Server2):
+#   Tier 1: 1.0% risk (DD < 4%)
+#   Tier 2: 0.5% risk (DD >= 4%) ← ACTIVE NOW (DD=4.98%)
 #
-# ── EVALUATION PHASE (current) ──
-# Goal: Pass 8% target quickly. 1.5% risk, drop to 1% at 2% DD.
-# $6,000 account → ~$90/trade risk → target in ~5-8 winning trades
+# STELLAR-2 (Secondary account, ultra-conservative):
+#   Tier 1: 0.25% risk (DD < 4%)
+#   Tier 2: 0.125% risk (DD >= 4%)
 #
-# ── FUNDED PHASE (switch after passing) ──
-# Goal: 2-3% monthly payout on $100k. 0.5% risk, drop to 0.25% at 4% DD.
-# $100k account → $500/trade risk → ~$2k-3k/month target
-# To activate: uncomment FUNDED block below, comment out EVALUATION block.
-#
-# ── STELLAR-2 CONFIGURATION (0.25% RISK - CONSERVATIVE) ──
-# 2-tier step-down: ultra-conservative capital preservation
-# Tier 1: 0-4% DD → 0.25% risk (capital preservation focus)
-# Tier 2: 4%+ DD → 0.125% risk (survival mode — ultra-tight risk)
-# Locked as of 2026-03-26 for 5-10 trade monitoring period
-ADAPTIVE_RISK = {
-    'enabled': True,
-    'default_risk_percent': 0.25,   # Tier 1: DD < 4% (STELLAR-2: ultra-conservative)
-    'tier2_risk_percent': 0.125,    # Tier 2: DD >= 4%, survival mode
-    'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD from initial
-    'recovery_threshold': 1.0,      # Restore to tier1 when DD recovers below this offset
-}
-#
-# ── FUNDED (activate after passing challenge) ──
-# ADAPTIVE_RISK = {
-#     'enabled': True,
-#     'default_risk_percent': 0.5,    # Conservative — capital preservation
-#     'reduced_risk_percent': 0.25,   # Ultra-safe when in drawdown
-#     'drawdown_threshold': 4.0,      # Switch to 0.25% at 4% DD
-#     'recovery_threshold': 1.0,      # Switch back to 0.5% when DD < 1%
-# }
+# Both accounts locked for 5-10 trade monitoring period (2026-03-26)
+
+# Determine account profile and apply correct risk tiers
+_account_profile = os.environ.get('ACCOUNT_PROFILE', '').strip().lower()
+
+if _account_profile == 'stellar15k':
+    # STELLAR-15K: Higher tier baseline (1.0% → 0.5%)
+    ADAPTIVE_RISK = {
+        'enabled': True,
+        'default_risk_percent': 1.0,    # Tier 1: DD < 4% (normal trading)
+        'tier2_risk_percent': 0.5,      # Tier 2: DD >= 4% (drawdown protection)
+        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
+        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+    }
+    ATR_SL_ENABLED = False            # Disabled - reverting to fixed buffers
+    EDGE_GUARD_ENABLED = False        # Disabled - let it trade freely
+elif _account_profile == 'stellar3':
+    # STELLAR-3: Conservative (1.0% → 0.5%)
+    ADAPTIVE_RISK = {
+        'enabled': True,
+        'default_risk_percent': 1.5,    # Tier 1: DD < 4% (conservative risk)
+        'tier2_risk_percent': 1,      # Tier 2: DD >= 4% (drawdown protection)
+        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
+        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+    }
+    ATR_SL_ENABLED = False            # Fixed buffers
+    EDGE_GUARD_ENABLED = False        # Disabled — trading freely
+else:
+    # STELLAR-2: Standard (1.5% → 1.0%)
+    ADAPTIVE_RISK = {
+        'enabled': True,
+        'default_risk_percent': 1.5,    # Tier 1: DD < 4% (standard risk)
+        'tier2_risk_percent': 1.0,      # Tier 2: DD >= 4% (drawdown protection)
+        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
+        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+    }
+    ATR_SL_ENABLED = False            # Fixed buffers
+    EDGE_GUARD_ENABLED = False        # Disabled — trading freely
 
 # ============================================================================
 # NOTIFICATION SETTINGS (from .env)
@@ -336,10 +360,88 @@ PROFITABLE_INDICES = {
         'timezone': 'America/New_York',
     },
     
-    # SWI20 removed — spread too wide (3-5.6 pts) eats 43-81% of R,
-    # only 13/113 trades pass spread guard, marginal +$203 over 3yr.
-    # 'SWI20': { ... },
-    
+    'SWI20': {
+        'symbol': 'SWI20',
+        'description': 'Swiss SMI 20 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'CHF',
+        'point_value': 12.93,       # $ per point per lot (verified via MT5 order_calc_profit)
+        'sl_buffer': 2.0,
+        'min_sl_distance': 5.0,
+        'max_sl_distance': 200.0,
+
+        # ORB strategy params — backtest-validated (PF 2.83 with limit orders)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.0,
+        'body_min': 0.70,
+        'close_strength': 0.25,
+        'breakout_margin': 0.15,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 5.0,
+        'max_sl_points': 200.0,
+
+        # Trading Hours — SIX Swiss Exchange 9:00-17:30 CET
+        'market_open_hour': 9,
+        'market_open_minute': 0,
+        'market_close_hour': 17,
+        'market_close_minute': 30,
+        'force_close_hour': 17,
+        'force_close_minute': 15,
+
+        # MT5 Time (EET — CET+1: 9:00-17:30 CET = 10:00-18:30 EET)
+        'mt5_open_hour': 10,
+        'mt5_open_minute': 0,
+        'mt5_close_hour': 18,
+        'mt5_close_minute': 30,
+
+        'timezone': 'Europe/Zurich',
+    },
+
+    'JP225': {
+        'symbol': 'JP225',
+        'description': 'Nikkei 225 CFD',
+        'contract_size': 10,
+        'tick_size': 0.01,
+        'tick_value': 0.01,
+        'currency': 'JPY',
+        'point_value': 10.0,        # $ per point per lot (verified via MT5 order_calc_profit)
+        'sl_buffer': 10.0,
+        'min_sl_distance': 20.0,
+        'max_sl_distance': 500.0,
+
+        # ORB strategy params — backtest-validated (PF 1.77 with limit orders)
+        'orb_minutes': 15,
+        'entry_hours': 2,
+        'breakout_window_minutes': 60,
+        'disp_mult': 1.5,
+        'body_min': 0.60,
+        'close_strength': 0.30,
+        'breakout_margin': 0.10,
+        'orb_range_min_mult': 0.5,
+        'min_sl_points': 20.0,
+        'max_sl_points': 500.0,
+
+        # Trading Hours — TSE 9:00-15:00 JST
+        'market_open_hour': 9,
+        'market_open_minute': 0,
+        'market_close_hour': 15,
+        'market_close_minute': 0,
+        'force_close_hour': 14,
+        'force_close_minute': 45,
+
+        # MT5 Time (EET — JST-7: 9:00-15:00 JST = 2:00-8:00 EET)
+        'mt5_open_hour': 2,
+        'mt5_open_minute': 0,
+        'mt5_close_hour': 8,
+        'mt5_close_minute': 0,
+
+        'timezone': 'Asia/Tokyo',
+    },
+
     'US2000': {
         'symbol': 'US2000',
         'description': 'Russell 2000 CFD',
