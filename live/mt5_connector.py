@@ -1146,11 +1146,14 @@ class LiveTrader:
     def _get_session_name(self, symbol: str) -> str:
         """Map symbol to trading session name for edge diagnostics."""
         us_symbols = {'SPX500', 'NDX100', 'US30', 'US2000'}
-        eu_symbols = {'GER30', 'FRA40'}
+        eu_symbols = {'GER30', 'FRA40', 'SWI20'}
+        asia_symbols = {'JP225'}
         if symbol in us_symbols:
             return "US"
         elif symbol in eu_symbols:
             return "EU"
+        elif symbol in asia_symbols:
+            return "ASIA"
         return "Other"
 
     # ────────────────────────────────────────────────────────────────────

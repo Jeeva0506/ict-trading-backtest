@@ -38,6 +38,7 @@ class EconomicCalendar:
         'GER30': ['EUR', 'USD'],  # Also affected by USD news
         'FRA40': ['EUR', 'USD'],  # CAC40 — affected by EUR and USD news
         'SWI20': ['CHF', 'EUR'],  # Swiss index, also affected by EUR news
+        'JP225': ['JPY', 'USD'],  # Nikkei, affected by BOJ/JPY and USD news
     }
 
     def __init__(self, buffer_before_minutes: int = 5,

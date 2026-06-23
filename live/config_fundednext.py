@@ -539,6 +539,14 @@ HIGH_IMPACT_NEWS = {
         'Swiss GDP',
         'Swiss Trade Balance',
     ],
+    'JPY': [
+        'BOJ Interest Rate Decision',
+        'BOJ Press Conference',
+        'Japanese CPI',
+        'Japanese GDP',
+        'Tankan Manufacturing Index',
+        'Tankan Non-Manufacturing Index',
+    ],
 }
 
 
