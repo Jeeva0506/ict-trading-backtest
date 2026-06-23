@@ -31,6 +31,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import logging
 
+# ── Venv guard removed ────────────────────────────────────────────────
+# The .venv launcher stubs on Windows spawn child processes, causing
+# duplicate watchdogs and bots. Launch via .venv/Scripts/python.exe
+# (the stub handles site-packages setup, sys.executable is the real
+# interpreter). No re-exec needed.
+
 # ── CRITICAL: parse --account BEFORE any config imports ──────────────
 _pre_parser = argparse.ArgumentParser(add_help=False)
 _pre_parser.add_argument('--account', type=str, default='',
@@ -136,28 +142,47 @@ MT5_PATHS = [
 def acquire_lock():
     """Try to acquire exclusive lock. Returns True if successful, False if another instance is running."""
     try:
-        if LOCK_FILE.exists():
-            # Check if the PID in the lock file is still running
-            try:
-                with open(LOCK_FILE, 'r') as f:
-                    old_pid = int(f.read().strip())
-                if psutil.pid_exists(old_pid):
-                    try:
-                        proc = psutil.Process(old_pid)
-                        if 'python' in proc.name().lower():
-                            logger.error(f"Another watchdog is already running (PID: {old_pid})")
-                            return False
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass  # Stale lock, safe to overwrite
-            except (ValueError, FileNotFoundError):
-                pass  # Corrupted lock file, overwrite
-        
-        # Write our PID to the lock file
-        with open(LOCK_FILE, 'w') as f:
-            f.write(str(os.getpid()))
-        
-        logger.info(f"Lock acquired, PID: {os.getpid()}")
-        return True
+        # Atomic exclusive creation — avoids TOCTOU race between two simultaneous starts
+        try:
+            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(str(os.getpid()))
+            logger.info(f"Lock acquired, PID: {os.getpid()}")
+            return True
+        except FileExistsError:
+            pass  # Lock file already exists — check if owner is alive
+
+        # Lock exists — determine whether it belongs to a live watchdog
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            if psutil.pid_exists(old_pid):
+                try:
+                    proc = psutil.Process(old_pid)
+                    if 'python' in proc.name().lower():
+                        logger.error(f"Another watchdog is already running (PID: {old_pid})")
+                        return False
+                except psutil.AccessDenied:
+                    # Cannot inspect the process (e.g. different user / Task Scheduler SYSTEM).
+                    # Treat as alive to avoid overwriting a legitimate lock.
+                    logger.error(f"Another watchdog is running (PID: {old_pid}, access denied)")
+                    return False
+                except psutil.NoSuchProcess:
+                    pass  # Process vanished between pid_exists and Process() — stale
+        except (ValueError, FileNotFoundError):
+            pass  # Corrupted or missing lock — fall through to overwrite
+
+        # Stale lock — remove and re-acquire atomically
+        LOCK_FILE.unlink(missing_ok=True)
+        try:
+            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(str(os.getpid()))
+            logger.info(f"Lock acquired (replaced stale lock), PID: {os.getpid()}")
+            return True
+        except FileExistsError:
+            logger.error("Lock was grabbed by another process during stale cleanup")
+            return False
     except Exception as e:
         logger.error(f"Error acquiring lock: {e}")
         return False
@@ -178,15 +203,11 @@ class TradingWatchdog:
     
     def __init__(self):
         # Determine Python path: prefer pythonw (no console window) > python
-        venv_dir = Path(__file__).parent.parent / '.venv' / 'Scripts'
-        venv_pythonw = venv_dir / 'pythonw.exe'
-        venv_python = venv_dir / 'python.exe'
-        if venv_pythonw.exists():
-            self.python_path = venv_pythonw
-        elif venv_python.exists():
-            self.python_path = venv_python
-        else:
-            self.python_path = Path(sys.executable)
+        # Use _base_executable — the REAL interpreter, not the .venv launcher
+        # stub. On Windows, .venv/python.exe is a stub that spawns the system
+        # Python as a child process, causing duplicates. _base_executable
+        # gives the actual interpreter path directly.
+        self.python_path = Path(getattr(sys, '_base_executable', sys.executable))
         self.script_path = Path(__file__).parent / 'run_live.py'
         # Build subprocess command — pass --account to run_live.py if set
         self._account_profile = _pre_args.account
