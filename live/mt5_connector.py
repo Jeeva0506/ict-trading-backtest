@@ -392,6 +392,131 @@ class MT5Connector:
             "fill_price": fill_price,
         }
 
+    # ── place limit order ─────────────────────────────────────────────
+    def place_limit_order(self, symbol: str, order_type: str, volume: float,
+                          price: float, sl: float, tp: float,
+                          timeout_seconds: int = 10, comment: str = "") -> dict:
+        """Place a limit order and wait for fill up to timeout_seconds.
+        Short timeout (10s default) to avoid blocking the main loop.
+        Returns same dict as place_order on fill, or success=False on timeout.
+        """
+        sym_info = mt5.symbol_info(symbol)
+        if sym_info is None:
+            return {"success": False, "error": "Symbol not found"}
+        if not sym_info.visible:
+            mt5.symbol_select(symbol, True)
+
+        _digits = sym_info.digits
+        _tick = getattr(sym_info, 'trade_tick_size', 0) or 0
+
+        # Round price to tick grid
+        if _tick > 0:
+            price = round(round(price / _tick) * _tick, _digits)
+        else:
+            price = round(price, _digits)
+        sl = round(sl, _digits)
+        if _tick > 0:
+            tp = round(round(tp / _tick) * _tick, _digits)
+        else:
+            tp = round(tp, _digits)
+
+        # Pre-check: is limit price still valid (not already past market)?
+        bid, ask = self.get_current_price(symbol)
+        if bid and ask:
+            if order_type.lower() == "buy" and price > ask:
+                logger.info(f"{symbol}: Limit BUY {price} > ask {ask}, price already past limit — skipping")
+                return {"success": False, "error": "limit_price_past_market"}
+            if order_type.lower() == "sell" and price < bid:
+                logger.info(f"{symbol}: Limit SELL {price} < bid {bid}, price already past limit — skipping")
+                return {"success": False, "error": "limit_price_past_market"}
+
+        if order_type.lower() == "buy":
+            trade_type = mt5.ORDER_TYPE_BUY_LIMIT
+        else:
+            trade_type = mt5.ORDER_TYPE_SELL_LIMIT
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": round(volume, 2),
+            "type": trade_type,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": 0,
+            "magic": BOT_MAGIC,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        }
+
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            err = result.comment if result else "order_send returned None"
+            logger.error(f"{symbol}: Limit order failed: {err} (retcode={result.retcode if result else 'None'})")
+            return {"success": False, "error": err}
+
+        order_ticket = result.order
+        logger.info(f"{symbol}: Limit {order_type.upper()} {volume} lots @ {price} placed (ticket={order_ticket}), waiting {timeout_seconds}s")
+
+        # Poll for fill — short timeout to avoid blocking main loop
+        t_start = time.time()
+        while time.time() - t_start < timeout_seconds:
+            orders = mt5.orders_get(ticket=order_ticket)
+            if not orders:
+                # Order gone from pending list = likely filled
+                # Match by order ticket in deal history (most reliable)
+                from datetime import timezone as _tz
+                _now = datetime.now(_tz.utc)
+                deals = mt5.history_deals_get(_now - timedelta(seconds=30), _now)
+                if deals:
+                    for d in deals:
+                        if d.order == order_ticket and d.symbol == symbol:
+                            logger.info(f"{symbol}: Limit fill confirmed via deal history @ {d.price} (ticket={d.position_id})")
+                            return {
+                                "success": True,
+                                "ticket": d.order,
+                                "position_id": d.position_id,
+                                "volume": d.volume,
+                                "price": price,
+                                "sl": sl,
+                                "tp": tp,
+                                "fill_price": d.price,
+                            }
+                # Fallback: check open positions
+                positions = mt5.positions_get(symbol=symbol)
+                if positions:
+                    for p in positions:
+                        if p.comment == comment and abs(p.volume - volume) < 0.001:
+                            logger.info(f"{symbol}: Limit fill found via position match @ {p.price_open}")
+                            return {
+                                "success": True,
+                                "ticket": p.ticket,
+                                "position_id": p.ticket,
+                                "volume": p.volume,
+                                "price": price,
+                                "sl": sl,
+                                "tp": tp,
+                                "fill_price": p.price_open,
+                            }
+                logger.warning(f"{symbol}: Limit order {order_ticket} gone but no fill detected")
+                break
+            time.sleep(0.3)
+
+        # Timeout or order vanished without fill — cancel if still pending
+        orders = mt5.orders_get(ticket=order_ticket)
+        if orders:
+            cancel_req = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": order_ticket,
+            }
+            cancel_result = mt5.order_send(cancel_req)
+            if cancel_result and cancel_result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"{symbol}: Limit order {order_ticket} cancelled after {timeout_seconds}s (no fill)")
+            else:
+                logger.error(f"{symbol}: FAILED to cancel limit order {order_ticket} — check MT5 manually!")
+        return {"success": False, "error": "limit_timeout"}
+
     # ── modify SL/TP ────────────────────────────────────────────────────
     def modify_position(self, ticket: int, sl: float = None, tp: float = None,
                         max_retries: int = 3) -> bool:
@@ -1053,6 +1178,20 @@ class LiveTrader:
         risk_pct = self.dd_protection.get_adaptive_risk(balance)
         logger.info(f"Risk per trade: {risk_pct}% = ${balance * risk_pct / 100:,.2f}")
 
+        # Cancel orphan pending orders from previous session (limit orders
+        # that were placed but bot crashed before fill/cancel).
+        try:
+            pending = mt5.orders_get()
+            if pending:
+                for o in pending:
+                    if o.magic == BOT_MAGIC:
+                        cancel_req = {"action": mt5.TRADE_ACTION_REMOVE, "order": o.ticket}
+                        cr = mt5.order_send(cancel_req)
+                        status = "cancelled" if (cr and cr.retcode == mt5.TRADE_RETCODE_DONE) else "FAILED"
+                        logger.warning(f"Orphan pending order {o.ticket} ({o.symbol}) {status}")
+        except Exception as e:
+            logger.warning(f"Orphan order cleanup failed: {e}")
+
         # Create strategy instances for each symbol (with backtest-locked params)
         for symbol, cfg in PROFITABLE_INDICES.items():
             self.strategies[symbol] = StrategyICTClean(
@@ -1592,9 +1731,10 @@ class LiveTrader:
             self.trade_taken_today[symbol] = True
             return
 
-        # Random delay 0.3-0.8s (prop-firm detection avoidance)
-        delay = random.uniform(0.3, 0.8)
-        time.sleep(delay)
+        # Delay removed — was 0.3-0.8s for prop-firm detection avoidance.
+        # Analysis showed this adds 0.55s avg to execution, contributing to
+        # 5-6s signal-to-fill gap that causes 17-37 pts adverse drift on
+        # volatile breakouts. FundedNext does not flag instant execution.
 
         # ── LIVE PRICE for accurate lot sizing ────────────────────────
         # Use current bid/ask (not stale signal entry) so lot size
@@ -1778,11 +1918,51 @@ class LiveTrader:
             sig["entry_price"] = round(sig["entry_price"], _digits)
 
         t_order_start = time.perf_counter()
-        result = self.mt5.place_order(
-            symbol, order_type, lots,
-            sl=sig["stop_loss"], tp=sig["tp"],
-            comment=comment
-        )
+
+        # STELLAR-2: Use limit order at signal entry price for zero-slippage fills.
+        # Other accounts use market orders (default behavior).
+        # Limit order fills at exact price or better; times out after 60s if not filled.
+        _use_limit = ACCOUNT_LABEL in ("STELLAR-2", "STELLAR-15K")
+        if _use_limit:
+            # Limit price = signal entry, rounded to favorable tick for fill.
+            # BUY LIMIT: round UP to nearest tick (higher = more likely to fill,
+            #   we pay at most 1 tick worse than ideal but guarantee fill).
+            # SELL LIMIT: round DOWN to nearest tick (lower = more likely to fill).
+            _lp_raw = sig["entry_price"]
+            _si = mt5.symbol_info(symbol)
+            if _si:
+                _tick = getattr(_si, 'trade_tick_size', 0) or (10 ** -_si.digits)
+                _dg = _si.digits
+                if order_type == "buy":
+                    import math
+                    limit_price = round(math.ceil(_lp_raw / _tick) * _tick, _dg)
+                else:
+                    import math
+                    limit_price = round(math.floor(_lp_raw / _tick) * _tick, _dg)
+            else:
+                limit_price = _lp_raw
+            logger.info(f"{symbol}: LIMIT ORDER mode ({ACCOUNT_LABEL}) — signal={_lp_raw:.2f}, limit={limit_price} (tick-rounded)")
+            result = self.mt5.place_limit_order(
+                symbol, order_type, lots,
+                price=limit_price,
+                sl=sig["stop_loss"], tp=sig["tp"],
+                timeout_seconds=10, comment=comment
+            )
+            if not result["success"]:
+                _lerr = result.get("error", "")
+                if _lerr in ("limit_timeout", "limit_price_past_market"):
+                    logger.info(f"{symbol}: Limit order not filled ({_lerr}), trade skipped")
+                    self.telegram.send_message(
+                        f"[{symbol}] Limit order skipped ({_lerr}) @ {limit_price:.2f}")
+                    self.trade_taken_today[symbol] = True
+                    return
+                # Other errors fall through to the general error handler below
+        else:
+            result = self.mt5.place_order(
+                symbol, order_type, lots,
+                sl=sig["stop_loss"], tp=sig["tp"],
+                comment=comment
+            )
         exec_latency_ms = round((time.perf_counter() - t_order_start) * 1000)
 
         if not result["success"]:
@@ -1898,7 +2078,7 @@ class LiveTrader:
         # some brokers, making the fine-tune modify the only TP-set mechanism.
         # If that modify was rejected (invalid price, wrong ticket), TP stays at 0
         # and the trade never closes automatically. Force-set if mismatch found.
-        time.sleep(0.3)
+        time.sleep(1.5)
         _pos_verify = mt5.positions_get(ticket=position_id)
         if _pos_verify:
             _broker_tp = _pos_verify[0].tp
