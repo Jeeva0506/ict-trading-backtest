@@ -1619,6 +1619,7 @@ class LiveTrader:
             "signal_time": str(sig.entry_time),
             "signal_price": getattr(sig, 'signal_price', sig.entry_price),
             "breakout_time": str(sig.breakout_time) if getattr(sig, 'breakout_time', None) else "",
+            "session_end": str(session_end),
         }
 
     # ────────────────────────────────────────────────────────────────────
@@ -2143,6 +2144,7 @@ class LiveTrader:
             "fill_drift_pts": abs(fill_price - sig["entry_price"]),
             "spread_entry": spread_pts_entry,
             "exec_latency_ms": exec_latency_ms,
+            "session_end": sig.get("session_end", ""),
         }
 
         # Verify SL is correctly set (sl_protection: 3 retries + emergency close)
@@ -2487,8 +2489,6 @@ class LiveTrader:
                 import pytz
                 force_close_triggered = False
                 try:
-                    # Use server-time force-close to match session boundaries
-                    # and avoid DST-mismatch bugs between US/EU clocks.
                     from datetime import timezone as _fctz, timedelta as _fctd
                     _fc_offset = self._get_broker_utc_offset()
                     _fc_broker_tz = _fctz(_fctd(hours=_fc_offset))
@@ -2496,15 +2496,20 @@ class LiveTrader:
                     local_now = _fc_utc_now.astimezone(_fc_broker_tz).replace(tzinfo=None)
                     now_min = local_now.hour * 60 + local_now.minute
 
-                    # Use mt5_ hours (fixed server time, DST-immune)
-                    force_h = config.get("force_close_hour", config["market_close_hour"])
-                    force_m = config.get("force_close_minute", config.get("market_close_minute", 0))
-                    # Convert force_close from local market tz to server tz
-                    # by using the mt5_close as anchor and offset back 15 min
-                    mt5_close_h = config.get("mt5_close_hour", 23)
-                    mt5_close_m = config.get("mt5_close_minute", 0)
-                    force_min = mt5_close_h * 60 + mt5_close_m - 15  # 15 min before session end
-                    close_min = mt5_close_h * 60 + mt5_close_m
+                    # Primary: use session_end stored at trade entry (computed
+                    # by _generate_signal with pytz — DST-proof, same value
+                    # that determined the ORB boundaries).
+                    _stored_end = info.get("session_end", "")
+                    if _stored_end:
+                        _se = pd.Timestamp(_stored_end)
+                        close_min = _se.hour * 60 + _se.minute
+                        force_min = close_min - 15
+                    else:
+                        # Fallback for trades opened before this fix: static mt5 hours
+                        mt5_close_h = config.get("mt5_close_hour", 23)
+                        mt5_close_m = config.get("mt5_close_minute", 0)
+                        close_min = mt5_close_h * 60 + mt5_close_m
+                        force_min = close_min - 15
 
                     if force_min <= now_min < close_min:
                         force_close_triggered = True
