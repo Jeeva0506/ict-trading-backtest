@@ -53,6 +53,7 @@ class EconomicCalendar:
         self.cache_minutes = cache_minutes
         self.cache = []
         self.last_fetch = None
+        self.fetch_failed = False
         # FIX B8: Use namespaced cache dir to avoid write race between accounts
         if cache_dir:
             self.cache_file = Path(cache_dir) / 'news_cache.json'
@@ -97,14 +98,15 @@ class EconomicCalendar:
             logger.warning(f"Could not load news cache from disk: {e}")
 
     def _fetch_forex_factory(self) -> List[dict]:
-        """Fetch from Forex Factory"""
+        """Fetch from Forex Factory. Returns None on failure (not empty list)."""
         try:
             response = requests.get(self.SOURCES['forex_factory'], timeout=10)
             if response.status_code == 200:
                 return response.json()
+            logger.error(f"Forex Factory HTTP {response.status_code}")
         except Exception as e:
             logger.error(f"Forex Factory fetch failed: {e}")
-        return []
+        return None
 
     def fetch_news(self) -> List[dict]:
         """Fetch news from all sources"""
@@ -117,6 +119,12 @@ class EconomicCalendar:
         # Fetch fresh data
         events = self._fetch_forex_factory()
 
+        if events is None:
+            self.fetch_failed = True
+            logger.warning("News calendar fetch failed — will block trading as safety measure")
+            return self.cache  # return stale cache, fetch_failed flag handles blocking
+
+        self.fetch_failed = False
         if events:
             self.cache = events
             self.last_fetch = datetime.now()
@@ -193,10 +201,24 @@ class EconomicCalendar:
     def is_news_time(self, symbol: str) -> Tuple[bool, Optional[dict]]:
         """
         Check if it's news time for a symbol.
+        Fail-safe: if calendar fetch failed AND cache is stale (>2 hours),
+        block trading rather than allowing trades during unknown news windows.
 
         Returns:
             (is_news: bool, event_details: dict or None)
         """
+        # Fail-safe: if fetch failed and cache is old, assume news is active
+        if self.fetch_failed and self.last_fetch:
+            cache_age_hours = (datetime.now() - self.last_fetch).total_seconds() / 3600
+            if cache_age_hours > 2.0:
+                return True, {
+                    'title': 'CALENDAR UNAVAILABLE (fetch failed, stale cache)',
+                    'time': 'unknown',
+                    'currency': 'ALL',
+                    'minutes_away': 0,
+                    'impact': 'high',
+                }
+
         upcoming = self.get_upcoming_high_impact(symbol)
 
         if upcoming:

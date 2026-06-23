@@ -1675,8 +1675,8 @@ class LiveTrader:
         try:
             is_news, event = self.news_filter.is_news_time(symbol)
         except Exception as e:
-            logger.error(f"News filter error for {symbol}: {e}")
-            is_news, event = False, {}
+            logger.error(f"News filter error for {symbol}: {e} — blocking trade as safety measure")
+            is_news, event = True, {'title': f'News filter exception: {e}', 'minutes_away': 0}
         if is_news:
             mins = event.get('minutes_away', 0)
             label = f"in {mins:.0f}m" if mins > 0 else f"{abs(mins):.0f}m ago"
@@ -1986,6 +1986,19 @@ class LiveTrader:
         if not fill_price:
             fill_price = expected_price or result["price"]
             logger.warning(f"{symbol}: fill_price was 0.0, using fallback={fill_price}")
+
+        # ── PARTIAL FILL CHECK ─────────────────────────────────────
+        filled_volume = result.get("volume", lots)
+        if abs(filled_volume - lots) > 0.001:
+            logger.critical(
+                f"{symbol}: PARTIAL FILL — requested {lots} lots, filled {filled_volume} lots. "
+                f"Adjusting SL/TP for actual volume.")
+            self.telegram.critical_alert(
+                "PARTIAL FILL",
+                f"{symbol}: Requested {lots} lots, filled {filled_volume}\n"
+                f"Risk is {'lower' if filled_volume < lots else 'HIGHER'} than planned.\n"
+                f"SL/TP remain at same price levels.")
+            lots = filled_volume  # use actual filled volume for tracking
 
         # Slippage monitoring
         slippage = abs(fill_price - expected_price) if expected_price else 0
