@@ -97,15 +97,47 @@ class EconomicCalendar:
         except Exception as e:
             logger.warning(f"Could not load news cache from disk: {e}")
 
+    # Browser-like UA + Accept. Diagnosed Jun 2026: the endpoint and the bot's
+    # exact call both return HTTP 200 — failures were transient network errors
+    # (WinError 10051/10065, SSLEOFError), not a format/UA block. UA added as
+    # cheap insurance against CDN throttling of header-less requests.
+    _HTTP_HEADERS = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0 Safari/537.36"),
+        "Accept": "application/json,text/plain,*/*",
+    }
+
     def _fetch_forex_factory(self) -> List[dict]:
-        """Fetch from Forex Factory. Returns None on failure (not empty list)."""
+        """Fetch from Forex Factory. Returns None on failure (not empty list).
+
+        Resilient to transient network blips: retries the request a few times
+        with backoff before giving up, so a single dropped connection doesn't
+        mark the calendar unavailable and trip the 2h trading block.
+        """
+        from requests.adapters import HTTPAdapter
         try:
-            response = requests.get(self.SOURCES['forex_factory'], timeout=10)
+            from urllib3.util.retry import Retry
+        except Exception:
+            Retry = None
+
+        session = requests.Session()
+        if Retry is not None:
+            retry = Retry(total=3, connect=3, read=3, backoff_factor=0.6,
+                          status_forcelist=[429, 500, 502, 503, 504],
+                          allowed_methods=["GET"])
+            session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        url = self.SOURCES['forex_factory']
+        try:
+            response = session.get(url, headers=self._HTTP_HEADERS, timeout=(5, 15))
             if response.status_code == 200:
                 return response.json()
             logger.error(f"Forex Factory HTTP {response.status_code}")
         except Exception as e:
-            logger.error(f"Forex Factory fetch failed: {e}")
+            logger.error(f"Forex Factory fetch failed after retries: {e}")
+        finally:
+            session.close()
         return None
 
     def fetch_news(self) -> List[dict]:
