@@ -1,9 +1,15 @@
 # backtest_live_setup.py
+import os
 import pandas as pd
 from pathlib import Path
 from datetime import timedelta
 
 from strategy.strategy_ict_clean import StrategyICTClean
+
+# Marketable-limit cap sweep: extra adverse entry slippage as a fraction of R.
+# 0 = current behavior (fill at signal price). >0 models a marketable limit that
+# fills ~100% at current market, capped at this R-fraction of slippage.
+_ENTRY_CAP_R = float(os.getenv("ENTRY_CAP_R", "0"))
 
 BROKER_POINT_VALUES = {
     # Values = USD per 1 index point per 1 lot (from MT5 order_calc_profit)
@@ -639,7 +645,8 @@ def run_portfolio_backtest(debug_strategy: bool = False):
         half_spread = spread_pts / 2.0  # entry gets half, exit gets half
 
         # Entry cost: slippage + half spread (always adverse)
-        entry_cost_pts = slippage_pts + half_spread
+        # + marketable-limit cap (ENTRY_CAP_R * R) when sweeping
+        entry_cost_pts = slippage_pts + half_spread + _ENTRY_CAP_R * risk_points
 
         # Exit cost depends on exit type:
         #   - TP: limit order, no slippage, just half spread
@@ -701,6 +708,21 @@ def run_portfolio_backtest(debug_strategy: bool = False):
             "trailing_dd_pct": round(trailing_dd_pct, 2),
             "lots": lots, "exit_reason": exit_reason,
         })
+
+    # Optional per-trade ledger export (for the FundedNext challenge sim).
+    # net_R = net-of-cost points / R; cost includes the marketable cap (ENTRY_CAP_R).
+    _ledger_path = os.getenv("EXPORT_TRADES")
+    if _ledger_path:
+        import csv as _csv
+        with open(_ledger_path, "w", newline="") as _f:
+            _w = _csv.writer(_f)
+            _w.writerow(["date", "symbol", "risk_points", "net_pnl_points", "net_R", "exit_reason"])
+            for _t in all_trades:
+                _rp = _t["risk_points"]
+                _nr = (_t["adjusted_pnl_points"] / _rp) if _rp else 0.0
+                _w.writerow([_t["date"], _t["symbol"], _rp,
+                             round(_t["adjusted_pnl_points"], 3), round(_nr, 4), _t["exit_reason"]])
+        print(f"  Exported {len(all_trades)} trades to {_ledger_path}")
 
     # Phase 3: Comprehensive Live Audit Report
     import numpy as np
