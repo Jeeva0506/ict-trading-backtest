@@ -118,6 +118,10 @@ _root_logger = logging.getLogger()
 if not any(isinstance(_h, logging.FileHandler) for _h in _root_logger.handlers):
     _root_logger.setLevel(logging.WARNING)
     _root_fh = logging.FileHandler(_log_dir / "app_warnings.log", encoding="utf-8")
+    # Handler-level filter: propagated records bypass the root logger's own
+    # level check, so set it here to keep this file to WARNING+ only (a child
+    # logger's INFO/DEBUG would otherwise land here and grow it unbounded).
+    _root_fh.setLevel(logging.WARNING)
     _root_fh.setFormatter(
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     _root_logger.addHandler(_root_fh)
