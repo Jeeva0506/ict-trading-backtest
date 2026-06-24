@@ -51,6 +51,8 @@ from config_fundednext import (
     ACCOUNT_LABEL,
     MT5_PATH,
     EDGE_GUARD_ENABLED,
+    USE_MARKETABLE_LIMIT,
+    MARKETABLE_CAP_R,
 )
 from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
@@ -425,10 +427,17 @@ class MT5Connector:
     # ── place limit order ─────────────────────────────────────────────
     def place_limit_order(self, symbol: str, order_type: str, volume: float,
                           price: float, sl: float, tp: float,
-                          timeout_seconds: int = 10, comment: str = "") -> dict:
+                          timeout_seconds: int = 10, comment: str = "",
+                          marketable: bool = False) -> dict:
         """Place a limit order and wait for fill up to timeout_seconds.
         Short timeout (10s default) to avoid blocking the main loop.
         Returns same dict as place_order on fill, or success=False on timeout.
+
+        marketable=True: the price is intentionally placed at/through the
+        current market (ask+cap for buy, bid-cap for sell) so it fills
+        immediately at market while capping worst-case slippage. In that mode
+        the "price past market" pre-check is skipped (being past market is the
+        whole point), and rounding is fill-friendly (handled by caller).
         """
         sym_info = mt5.symbol_info(symbol)
         if sym_info is None:
@@ -451,14 +460,17 @@ class MT5Connector:
             tp = round(tp, _digits)
 
         # Pre-check: is limit price still valid (not already past market)?
-        bid, ask = self.get_current_price(symbol)
-        if bid and ask:
-            if order_type.lower() == "buy" and price > ask:
-                logger.info(f"{symbol}: Limit BUY {price} > ask {ask}, price already past limit — skipping")
-                return {"success": False, "error": "limit_price_past_market"}
-            if order_type.lower() == "sell" and price < bid:
-                logger.info(f"{symbol}: Limit SELL {price} < bid {bid}, price already past limit — skipping")
-                return {"success": False, "error": "limit_price_past_market"}
+        # Skipped for marketable limits — those are deliberately at/through
+        # the market so they fill immediately (capped at the caller's slippage).
+        if not marketable:
+            bid, ask = self.get_current_price(symbol)
+            if bid and ask:
+                if order_type.lower() == "buy" and price > ask:
+                    logger.info(f"{symbol}: Limit BUY {price} > ask {ask}, price already past limit — skipping")
+                    return {"success": False, "error": "limit_price_past_market"}
+                if order_type.lower() == "sell" and price < bid:
+                    logger.info(f"{symbol}: Limit SELL {price} < bid {bid}, price already past limit — skipping")
+                    return {"success": False, "error": "limit_price_past_market"}
 
         if order_type.lower() == "buy":
             trade_type = mt5.ORDER_TYPE_BUY_LIMIT
@@ -1958,29 +1970,45 @@ class LiveTrader:
         # Limit order fills at exact price or better; times out after 60s if not filled.
         _use_limit = ACCOUNT_LABEL in ("STELLAR-2", "STELLAR-15K")
         if _use_limit:
-            # Limit price = signal entry, rounded to favorable tick for fill.
-            # BUY LIMIT: round UP to nearest tick (higher = more likely to fill,
-            #   we pay at most 1 tick worse than ideal but guarantee fill).
-            # SELL LIMIT: round DOWN to nearest tick (lower = more likely to fill).
-            _lp_raw = sig["entry_price"]
+            import math
             _si = mt5.symbol_info(symbol)
             if _si:
                 _tick = getattr(_si, 'trade_tick_size', 0) or (10 ** -_si.digits)
                 _dg = _si.digits
+            else:
+                _tick, _dg = 0.01, 2
+            _marketable = USE_MARKETABLE_LIMIT
+            if _marketable:
+                # MARKETABLE LIMIT: place at the current market plus a small cap
+                # so it fills immediately at market, but never worse than
+                # MARKETABLE_CAP_R * R of slippage. Fixes the resting limit's
+                # low fill rate (it only filled on pullbacks) while still
+                # capping bad-tick slippage. Caps scales with the trade's R.
+                _cb, _ca = self.mt5.get_current_price(symbol)
+                _ref = (_ca if order_type == "buy" else _cb) or expected_price
+                _cap_pts = MARKETABLE_CAP_R * live_risk_points
                 if order_type == "buy":
-                    import math
+                    limit_price = round(math.ceil((_ref + _cap_pts) / _tick) * _tick, _dg)
+                else:
+                    limit_price = round(math.floor((_ref - _cap_pts) / _tick) * _tick, _dg)
+                logger.info(f"{symbol}: MARKETABLE LIMIT ({ACCOUNT_LABEL}) — ref={_ref:.2f} "
+                            f"cap={MARKETABLE_CAP_R}R ({_cap_pts:.2f}pts) limit={limit_price}")
+            else:
+                # RESTING LIMIT at signal entry price (zero slippage but low
+                # fill rate — only fills on a pullback to the signal level).
+                # BUY: round UP to tick; SELL: round DOWN — fill-friendly.
+                _lp_raw = sig["entry_price"]
+                if order_type == "buy":
                     limit_price = round(math.ceil(_lp_raw / _tick) * _tick, _dg)
                 else:
-                    import math
                     limit_price = round(math.floor(_lp_raw / _tick) * _tick, _dg)
-            else:
-                limit_price = _lp_raw
-            logger.info(f"{symbol}: LIMIT ORDER mode ({ACCOUNT_LABEL}) — signal={_lp_raw:.2f}, limit={limit_price} (tick-rounded)")
+                logger.info(f"{symbol}: LIMIT ORDER mode ({ACCOUNT_LABEL}) — signal={_lp_raw:.2f}, limit={limit_price} (tick-rounded)")
             result = self.mt5.place_limit_order(
                 symbol, order_type, lots,
                 price=limit_price,
                 sl=sig["stop_loss"], tp=sig["tp"],
-                timeout_seconds=10, comment=comment
+                timeout_seconds=10, comment=comment,
+                marketable=_marketable,
             )
             if not result["success"]:
                 _lerr = result.get("error", "")
@@ -3196,8 +3224,21 @@ class LiveTrader:
                 self._consecutive_errors = 0
                 self._error_backoff = 30
 
-                # ── Sleep ──────────────────────────────────────────────
-                time.sleep(5)
+                # ── Bar-close-aligned sleep ────────────────────────────
+                # Entry slippage is dominated by signal-to-placement DELAY,
+                # not broker spread. The old fixed 5s sleep woke at a random
+                # 0-5s offset from each M1 bar close, so a fresh breakout sat
+                # 0-5s (avg 2.5s) before the bot even looked. Here we still
+                # tick at most every 5s (preserving connection/DD/position-
+                # management cadence), but when the next M1 bar close is
+                # sooner we sleep exactly to it (+0.5s for the broker to post
+                # the closed bar) — so a breakout is detected and the order
+                # placed within ~1s of bar close. With the marketable limit
+                # this directly shrinks the residual slippage.
+                _now = datetime.now()
+                _secs_into_bar = _now.second + _now.microsecond / 1e6
+                _to_bar_close = (60.0 - _secs_into_bar) + 0.5
+                time.sleep(max(0.3, min(_to_bar_close, 5.0)))
 
             except KeyboardInterrupt:
                 self._signal_handler(signal.SIGINT, None)
