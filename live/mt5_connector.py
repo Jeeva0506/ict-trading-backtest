@@ -96,6 +96,32 @@ _ch = logging.StreamHandler(_cs)
 _ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(_ch)
 
+# ── Contain network + propagated log spam (keeps stderr clean) ─────────
+# urllib3/requests dump multi-line retry tracebacks on every connectivity
+# blip (Telegram, news feed). With no handler on the root logger these
+# fell through to Python's last-resort stderr handler and ballooned
+# bot_stderr.log to multiple GB. Silence those libraries, stop our own
+# loggers from double-propagating to stderr, and give the root logger a
+# file so handler-less module loggers (news_filter, telegram_notifier,
+# edge_guard) write to a file instead of stderr. Genuine uncaught
+# exceptions still reach stderr via sys.excepthook, so the watchdog's
+# crash diagnosis stays intact.
+for _noisy in ("urllib3", "requests", "urllib3.connectionpool", "urllib3.util.retry"):
+    _nl = logging.getLogger(_noisy)
+    _nl.setLevel(logging.ERROR)
+    _nl.propagate = False
+
+logger.propagate = False
+_det_logger.propagate = False
+
+_root_logger = logging.getLogger()
+if not any(isinstance(_h, logging.FileHandler) for _h in _root_logger.handlers):
+    _root_logger.setLevel(logging.WARNING)
+    _root_fh = logging.FileHandler(_log_dir / "app_warnings.log", encoding="utf-8")
+    _root_fh.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    _root_logger.addHandler(_root_fh)
+
 # ── magic number for all bot orders (unique per account) ────────────────
 # Derive from login to guarantee different accounts get different magic numbers
 BOT_MAGIC = 20260000 + (MT5_LOGIN % 10000)
