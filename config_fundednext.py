@@ -139,6 +139,14 @@ HEARTBEAT_INTERVAL_SECONDS = 300  # Ping every 5 minutes
 # ============================================================================
 ACCOUNT_LABEL = os.getenv('ACCOUNT_LABEL', 'DEFAULT')
 MT5_PATH = os.getenv('MT5_PATH', '')           # path to terminal64.exe (empty = default)
+
+# ── Marketable-limit execution (STELLAR-2 / STELLAR-15K) ────────────────
+# Default OFF = resting limit at signal price. ON = limit at current market
+# + cap (ask+cap*R buy / bid-cap*R sell): fills at market, slippage capped at
+# MARKETABLE_CAP_R of R. Enable per account via .env.
+USE_MARKETABLE_LIMIT = os.getenv('USE_MARKETABLE_LIMIT', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
+MARKETABLE_CAP_R = float(os.getenv('MARKETABLE_CAP_R', '0.05'))
+
 # Comma-separated list of symbols to EXCLUDE from this account
 # e.g. EXCLUDE_INDICES=US2000,FRA40
 _EXCLUDE_RAW = os.getenv('EXCLUDE_INDICES', '')
