@@ -248,6 +248,22 @@ class TradingWatchdog:
             # Redirect stdout/stderr to files to prevent PIPE buffer deadlock
             stdout_log = log_dir / 'bot_stdout.log'
             stderr_log = log_dir / 'bot_stderr.log'
+            # Cap log growth: these are raw subprocess streams (not rotatable
+            # via logging). On each (re)start, if a file exceeds the cap, roll
+            # it to a single .old generation so total stays bounded (~2x cap).
+            # Prevents the multi-GB bot_stderr.log buildup from network-error
+            # traceback spam during connectivity drops.
+            _LOG_CAP_BYTES = 50 * 1024 * 1024  # 50 MB
+            for _lf in (stdout_log, stderr_log):
+                try:
+                    if _lf.exists() and _lf.stat().st_size > _LOG_CAP_BYTES:
+                        _old = _lf.with_suffix(_lf.suffix + '.old')
+                        if _old.exists():
+                            _old.unlink()
+                        _lf.rename(_old)
+                        logger.info(f"Rotated oversized log: {_lf.name} -> {_old.name}")
+                except Exception as _re:
+                    logger.warning(f"Log rotation check failed for {_lf.name}: {_re}")
             stdout_f = open(stdout_log, 'a', encoding='utf-8')
             stderr_f = open(stderr_log, 'a', encoding='utf-8')
             

@@ -14,6 +14,7 @@ Usage:
 import sys
 import io
 import os
+import time
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -202,7 +203,22 @@ def _acquire_bot_lock():
         except Exception:
             pass  # stale/corrupt lock — overwrite
 
-    lock.write_text(str(os.getpid()))
+    # Tolerant write: a transient file lock (AV scan, sync handle, slow
+    # release of a just-killed PID's handle) must NOT crash the bot. The
+    # lock is advisory — the watchdog manages lifecycle — so if we can't
+    # claim it after a few tries, log and continue rather than die and
+    # trigger a "too many restarts" watchdog shutdown.
+    _claimed = False
+    for _attempt in range(5):
+        try:
+            lock.write_text(str(os.getpid()))
+            _claimed = True
+            break
+        except (PermissionError, OSError) as _e:
+            time.sleep(0.5)
+            _last_err = _e
+    if not _claimed:
+        print(f"[WARN] Could not write bot.lock ({_last_err}); continuing without lock.")
     import atexit
     atexit.register(lambda: lock.unlink(missing_ok=True))
 
