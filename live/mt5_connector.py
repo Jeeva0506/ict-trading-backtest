@@ -1274,6 +1274,8 @@ class LiveTrader:
         logger.info("Telegram command handler started - use /help for commands")
 
         self.telegram.bot_started(list(PROFITABLE_INDICES.keys()), balance)
+        # Startup check: alert immediately if the terminal's AutoTrading is OFF.
+        self._check_autotrading()
         logger.info("Starting 24/7 trading loop...")
         return True
 
@@ -1366,6 +1368,57 @@ class LiveTrader:
 
         self.telegram.critical_alert("MT5 RECONNECT FAILED",
                                      "Could not reconnect after 5 attempts")
+        return False
+
+    # ────────────────────────────────────────────────────────────────────
+    #  AutoTrading (Algo) button check  (terminal-side toggle, retcode 10027)
+    # ────────────────────────────────────────────────────────────────────
+    def _check_autotrading(self) -> bool:
+        """Detect when the MT5 terminal's AutoTrading (Algo Trading) button is OFF.
+
+        MT5 rejects every order with retcode 10027 when this terminal-side toggle
+        is disabled (commonly after a terminal auto-update/restart, or an
+        accidental Ctrl+E). The bot otherwise only discovers this when an order is
+        rejected — by which time the signal is already lost (see US30 miss
+        2026-06-25 20:05). Proactively alert via Telegram so the button can be
+        re-enabled before the next setup fires.
+
+        Returns True if AutoTrading is enabled (or state can't be read), False if
+        confirmed disabled.
+        """
+        try:
+            ti = mt5.terminal_info()
+        except Exception as e:
+            logger.warning(f"terminal_info() failed during AutoTrading check: {e}")
+            return True  # don't false-alarm on a transient API hiccup
+        if ti is None:
+            return True
+
+        if ti.trade_allowed:
+            # Recovered — notify once if we had previously alerted on a disable.
+            if getattr(self, '_autotrading_disabled', False):
+                logger.info("AutoTrading re-enabled in terminal")
+                self.telegram.send_message(
+                    "AutoTrading RE-ENABLED — bot can place orders again")
+                self._autotrading_disabled = False
+                self._autotrading_alert_sent = None
+            return True
+
+        # Disabled — alert once, then throttle to every 15 min while still off.
+        now = datetime.now()
+        last = getattr(self, '_autotrading_alert_sent', None)
+        if last is None or (now - last).total_seconds() > 900:
+            logger.critical(
+                "AutoTrading DISABLED in MT5 terminal — orders will be rejected "
+                "(retcode 10027)")
+            self.telegram.critical_alert(
+                "AUTOTRADING DISABLED",
+                "The MT5 'Algo Trading' button is OFF — every order will be "
+                "rejected (retcode 10027) and signals will be missed.\n\n"
+                "Fix: click the green 'Algo Trading' button in the terminal "
+                "toolbar (or press Ctrl+E).")
+            self._autotrading_alert_sent = now
+        self._autotrading_disabled = True
         return False
 
     def _verify_positions_after_reconnect(self):
@@ -3073,6 +3126,9 @@ class LiveTrader:
 
                 # ── Daily reset ────────────────────────────────────────
                 self._check_daily_reset()
+
+                # ── AutoTrading (Algo) button check — alert if OFF ─────
+                self._check_autotrading()
 
                 # ── Scheduled reports ──────────────────────────────────
                 try:
