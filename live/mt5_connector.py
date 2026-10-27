@@ -34,6 +34,10 @@ import io
 sys.path.insert(0, str(Path(__file__).parent))           # live/
 sys.path.insert(0, str(Path(__file__).parent.parent))     # backtest_engine/
 
+# Rule 8: behaviour parameters must never fall back to a silent default.
+# `require()` raises instead. See config_guard.py for why (two divergent
+# config copies + depth-dependent .env resolution).
+from config_guard import require as _req
 from config_fundednext import (
     FUNDEDNEXT_RULES,
     ADAPTIVE_RISK,
@@ -53,6 +57,7 @@ from config_fundednext import (
     EDGE_GUARD_ENABLED,
     USE_MARKETABLE_LIMIT,
     MARKETABLE_CAP_R,
+    USE_LIMIT_ORDERS,
 )
 from strategy.strategy_ict_clean import StrategyICTClean
 from telegram_notifier import TelegramNotifier
@@ -207,12 +212,90 @@ class DrawdownProtection:
         }
 
     # ── adaptive risk (2-tier step-down) ─────────────────────────────────
-    def get_adaptive_risk(self, current_balance: float) -> float:
+    def get_adaptive_risk(self, current_balance: float, trades_today: int = 0) -> float:
+        """Risk percent for the NEXT trade.
+
+        `trades_today` is the count of trades already taken today, so it indexes
+        directly into ADAPTIVE_RISK['trade_sequence_risk'] (0 -> first trade of
+        the day). Callers that only report or label risk may omit it and get the
+        first-trade baseline.
+        """
         if not ADAPTIVE_RISK.get("enabled", False):
             return FUNDEDNEXT_RULES["risk_per_trade_percent"]
 
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
+
+        # ── BUFFER-DERIVED RISK (2026-10-01) ────────────────────────────
+        # Requested behaviour: risk rises as the account gains, falls in
+        # drawdown. Implemented by sizing against DISTANCE TO THE STATIC FLOOR
+        # rather than against profit, so the floor cannot be breached by
+        # construction:
+        #
+        #     risk% = SAFETY * (balance - floor) / (MCL * balance) * 100
+        #
+        # floor = initial * (1 - max_drawdown_percent/100), and it NEVER
+        # trails, so every dollar earned permanently widens the buffer. That is
+        # what makes the risk ladder self-financing.
+        #
+        # WHY NOT A FIXED PROFIT LADDER. A flat "2% once up 2%" rule breaches:
+        # at balance 6120 a repeat of the OBSERVED MCL of 6 costs
+        # 6 x 0.02 x 6120 = $734, leaving $5,386 against a $5,400 floor. The
+        # same 2% is safe at balance 6300 ($756 loss, leaves $5,544). The
+        # formula captures that distinction automatically.
+        #
+        # MCL = 6 is MEASURED, not assumed: 76 live ORB15 round trips on
+        # STELLAR-15K (WR 48.7%) contained a 6-trade losing streak.
+        #
+        # CAVEAT ON RECORD: ORB15's measured edge is ~zero (48.7% WR live,
+        # matching its causal backtest). Scaling risk on a zero-edge system
+        # multiplies variance without raising expected return. The sizing maths
+        # is sound; the edge it is applied to is not established.
+        if ADAPTIVE_RISK.get("buffer_derived", False):
+            mcl = float(ADAPTIVE_RISK.get("assumed_mcl", 6.0))
+            safety = float(ADAPTIVE_RISK.get("buffer_safety", 0.80))
+            rmin = float(ADAPTIVE_RISK.get("buffer_min_risk", 0.25))
+            rmax = float(ADAPTIVE_RISK.get("buffer_max_risk", 2.00))
+            floor = self.initial_balance * (
+                1.0 - FUNDEDNEXT_RULES["max_drawdown_percent"] / 100.0)
+            room = current_balance - floor
+            if room <= 0 or current_balance <= 0 or mcl <= 0:
+                logger.warning(
+                    f"Adaptive Risk: no buffer left (balance {current_balance:.2f} "
+                    f"vs floor {floor:.2f}) -> minimum {rmin}%")
+                return rmin
+            raw = safety * room / (mcl * current_balance) * 100.0
+            # the daily rule binds too: risk * trades_per_day must fit the
+            # daily allowance, else two losers alone breach it
+            per_day = max(1, int(FUNDEDNEXT_RULES["max_trades_per_day"]))
+            daily_cap = FUNDEDNEXT_RULES["daily_drawdown_stop"] / per_day
+            caps = [rmax, raw, daily_cap]
+
+            # DRAWDOWN BRAKE (2026-10-01, STELLAR-3). The buffer formula spends
+            # buffer_safety of the REMAINING room, so on an account already in
+            # drawdown it can size ABOVE the existing tier-2 brake: STELLAR-3 at
+            # balance 5709.66 (DD 4.84%) gave raw 0.72% against a tier-2 of
+            # 0.50%, i.e. a 44% risk INCREASE on the account with the least
+            # buffer left. With this flag the brake wins while in drawdown, and
+            # the ladder only engages once the account recovers above the
+            # threshold. The formula still caps on the way up.
+            if ADAPTIVE_RISK.get("buffer_respect_tier2", False):
+                _dd = max(0.0, (self.initial_balance - current_balance)
+                          / self.initial_balance * 100.0)
+                _t2_dd = ADAPTIVE_RISK.get("tier2_threshold", 4.0)
+                _t2_r = ADAPTIVE_RISK.get("tier2_risk_percent", 0.5)
+                if _dd >= _t2_dd:
+                    caps.append(_t2_r)
+                    logger.info(
+                        f"Adaptive Risk (buffer): DD={_dd:.2f}% >= {_t2_dd}% -> "
+                        f"tier-2 brake {_t2_r}% applied over raw {raw:.2f}%")
+
+            r = max(rmin, min(caps))
+            logger.info(
+                f"Adaptive Risk (buffer): balance {current_balance:.2f}, floor "
+                f"{floor:.2f}, room {room:.2f} -> raw {raw:.2f}% "
+                f"(cap {rmax}%, daily {daily_cap:.2f}%) -> {r:.2f}%")
+            return r
 
         # DD from initial balance (FundedNext Stellar measures from initial)
         dd_pct = ((self.initial_balance - current_balance) / self.initial_balance) * 100
@@ -225,6 +308,18 @@ class DrawdownProtection:
         if dd_pct >= tier2_dd:
             logger.info(f"Adaptive Risk: DD={dd_pct:.2f}% >= {tier2_dd}% -> {tier2_r}% risk (TIER 2)")
             return tier2_r
+
+        # Tier 1, stepped down by trade-of-day where configured (2026-08-20).
+        # Front-loads risk onto the first setup of the day and shrinks the
+        # second, so the worst-case day stays under the hard daily DD limit.
+        # The tier-2 drawdown brake above always takes precedence.
+        seq = ADAPTIVE_RISK.get("trade_sequence_risk")
+        if seq:
+            seq_r = float(seq[min(max(trades_today, 0), len(seq) - 1)])
+            logger.info(
+                f"Adaptive Risk: trade #{trades_today + 1} of day -> {seq_r}% risk (TIER 1)"
+            )
+            return seq_r
         return default_r
 
     # ── daily reset ─────────────────────────────────────────────────────
@@ -321,7 +416,8 @@ class MT5Connector:
 
     # ── place order ─────────────────────────────────────────────────────
     def place_order(self, symbol: str, order_type: str, volume: float,
-                    sl: float, tp: float, comment: str = "") -> dict:
+                    sl: float, tp: float, comment: str = "",
+                    deviation: int = 10) -> dict:
         sym_info = mt5.symbol_info(symbol)
         if sym_info is None:
             logger.error(f"Symbol {symbol} not found")
@@ -370,7 +466,7 @@ class MT5Connector:
             "price": price,
             "sl": sl,
             "tp": tp,
-            "deviation": 10,
+            "deviation": deviation,
             "magic": BOT_MAGIC,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
@@ -668,7 +764,7 @@ def is_market_open(symbol: str) -> bool:
     try:
         utc_now = datetime.now(pytz.UTC)
         # Convert to the index's LOCAL timezone for accurate DST handling
-        local_tz = pytz.timezone(config.get('timezone', 'America/New_York'))
+        local_tz = pytz.timezone(_req(config, "timezone"))
         local_now = utc_now.astimezone(local_tz).replace(tzinfo=None)
     except Exception:
         # Fallback: use config mt5_* hours as-is (already in server time approx)
@@ -1069,14 +1165,15 @@ class LiveTrader:
             return {'error': 'Not connected'}
         balance = account.get('balance', 0)
         dd = self.dd_protection.update(balance) if self.dd_protection else {}
-        risk_pct = self.dd_protection.get_adaptive_risk(balance) if self.dd_protection else 0
+        risk_pct = (self.dd_protection.get_adaptive_risk(balance, self.state.daily_trades)
+                    if self.dd_protection else 0)
         return {
             'balance': balance,
             'initial_balance': self.dd_protection.initial_balance if self.dd_protection else ACCOUNT_SIZE,
             'daily_dd': dd.get('daily_dd', 0),
             'overall_dd': dd.get('overall_dd', 0),
-            'daily_dd_limit': FUNDEDNEXT_RULES.get('daily_drawdown_stop', 3.0),
-            'overall_dd_limit': FUNDEDNEXT_RULES.get('max_drawdown_percent', 8.0),
+            'daily_dd_limit': _req(FUNDEDNEXT_RULES, "daily_drawdown_stop"),
+            'overall_dd_limit': _req(FUNDEDNEXT_RULES, "max_drawdown_percent"),
             'can_trade': dd.get('can_trade', True),
             'risk_percent': risk_pct,
             'risk_dollars': balance * risk_pct / 100,
@@ -1220,7 +1317,7 @@ class LiveTrader:
         self.state.last_reset_date = _get_fn_day()
 
         logger.info(f"LiveTrader initialized - Account Size: ${balance:,.2f}")
-        risk_pct = self.dd_protection.get_adaptive_risk(balance)
+        risk_pct = self.dd_protection.get_adaptive_risk(balance, self.state.daily_trades)
         logger.info(f"Risk per trade: {risk_pct}% = ${balance * risk_pct / 100:,.2f}")
 
         # Cancel orphan pending orders from previous session (limit orders
@@ -1240,17 +1337,17 @@ class LiveTrader:
         # Create strategy instances for each symbol (with backtest-locked params)
         for symbol, cfg in PROFITABLE_INDICES.items():
             self.strategies[symbol] = StrategyICTClean(
-                sl_buffer=cfg.get("sl_buffer", 1.0),
-                orb_minutes=cfg.get("orb_minutes", 15),
-                entry_hours=cfg.get("entry_hours", 2),
-                breakout_window_minutes=cfg.get("breakout_window_minutes", 60),
-                disp_mult=cfg.get("disp_mult", 1.5),       # Backtest-validated: 1.5 from config
-                body_min=cfg.get("body_min", 0.60),         # Backtest-validated: 0.60 from config
-                close_strength=cfg.get("close_strength", 0.25),
-                breakout_margin=cfg.get("breakout_margin", 0.10),  # Backtest-validated: 0.10 from config
-                orb_range_min_mult=cfg.get("orb_range_min_mult", 0.5),
-                min_sl_points=cfg.get("min_sl_points", 2.0),
-                max_sl_points=cfg.get("max_sl_points", 80.0),  # Aligned with backtest
+                sl_buffer=_req(cfg, "sl_buffer", symbol),
+                orb_minutes=_req(cfg, "orb_minutes", symbol),
+                entry_hours=_req(cfg, "entry_hours", symbol),
+                breakout_window_minutes=_req(cfg, "breakout_window_minutes", symbol),
+                disp_mult=_req(cfg, "disp_mult", symbol),       # Backtest-validated: 1.5 from config
+                body_min=_req(cfg, "body_min", symbol),         # Backtest-validated: 0.60 from config
+                close_strength=_req(cfg, "close_strength", symbol),
+                breakout_margin=_req(cfg, "breakout_margin", symbol),  # Backtest-validated: 0.10 from config
+                orb_range_min_mult=_req(cfg, "orb_range_min_mult", symbol),
+                min_sl_points=_req(cfg, "min_sl_points", symbol),
+                max_sl_points=_req(cfg, "max_sl_points", symbol),  # Aligned with backtest
                 tp3_r=2.5,
                 tp1_r=1.0,              # v3.14.6: reverted 0.75 → 1.0 (10yr data: BE=1.0R TRAIL=0.5R PF=1.09 vs 1.01)
                 trail_buffer_r=0.5,     # v3.14.6: reverted 1.0 → 0.5 (10yr validation: current config wins on all metrics)
@@ -1464,22 +1561,43 @@ class LiveTrader:
         the epoch value represents the *server-local* wall-clock, NOT real UTC.
         Compare with actual UTC epoch to derive the offset.
 
+        Cached for 60s. The offset only changes at DST transitions, but this
+        runs once per symbol per loop pass and probes up to 4 instruments, so
+        uncached it cost ~20 MT5 round-trips per cycle — latency that lands
+        between bar close and order placement, where it becomes entry drift.
+        A 60s TTL still surfaces a DST shift within a minute.
+
         Returns offset in hours (e.g. 3 for UTC+3 / EEST).
         """
         import time as _time
 
+        _now = _time.time()
+        _cached = getattr(self, "_broker_offset_cache", None)
+        if _cached is not None and (_now - _cached[1]) < 60.0:
+            return _cached[0]
+
+        offset = None
         for sym in ['EURUSD', 'SPX500', 'GER30', 'XAUUSD']:
             tick = mt5.symbol_info_tick(sym)
             if tick and tick.time > 0:
                 real_utc = int(_time.time())
                 offset_hours = round((tick.time - real_utc) / 3600)
                 if -12 <= offset_hours <= 14:
-                    return offset_hours
+                    offset = offset_hours
+                    break
 
-        # Fallback: FundedNext follows US DST (UTC+3 when US DST active, else UTC+2)
-        import pytz
-        ny = pytz.timezone('America/New_York')
-        return 3 if bool(datetime.now(ny).dst()) else 2
+        if offset is None:
+            # Fallback: FundedNext follows US DST (UTC+3 when US DST active, else UTC+2)
+            import pytz
+            ny = pytz.timezone('America/New_York')
+            offset = 3 if bool(datetime.now(ny).dst()) else 2
+
+        if _cached is not None and _cached[0] != offset:
+            logger.warning(
+                f"Broker UTC offset changed: {_cached[0]:+d}h -> {offset:+d}h "
+                f"(DST transition — ORB session boundaries shift)")
+        self._broker_offset_cache = (offset, _now)
+        return offset
 
     # ────────────────────────────────────────────────────────────────────
     #  HTF EMA computation (live: from MT5 H1 bars)
@@ -1735,7 +1853,7 @@ class LiveTrader:
         if self.trade_taken_today.get(symbol, False):
             return False, "already traded today"
         # Max trades per day across all symbols
-        if self.state.daily_trades >= FUNDEDNEXT_RULES.get("max_trades_per_day", 2):
+        if self.state.daily_trades >= _req(FUNDEDNEXT_RULES, "max_trades_per_day"):
             return False, "max daily trades reached"
         # DD check
         if self.dd_protection:
@@ -1759,7 +1877,7 @@ class LiveTrader:
             if not eg_can:
                 return False, eg_reason
         # Max open positions across ALL symbols (aligned with backtest MAX_OPEN_POSITIONS=2)
-        max_open = FUNDEDNEXT_RULES.get('max_open_positions', 2)
+        max_open = _req(FUNDEDNEXT_RULES, "max_open_positions")
         all_positions = self.mt5.get_open_positions()
         if len(all_positions) >= max_open:
             return False, f"max open positions ({max_open}) reached"
@@ -1796,7 +1914,7 @@ class LiveTrader:
 
         balance = account["balance"]
         free_margin = account["free_margin"]
-        risk_pct = self.dd_protection.get_adaptive_risk(balance)
+        risk_pct = self.dd_protection.get_adaptive_risk(balance, self.state.daily_trades)
         
         # BUG FIX (May 2026): Initialize actual_risk_amount early to prevent 
         # UnboundLocalError if error handling paths are triggered before line 1895
@@ -1864,6 +1982,47 @@ class LiveTrader:
                     f"{symbol}: LOT SIZING R adjusted — signal_R={sig['risk_points']:.2f} → "
                     f"live_R={live_risk_points:.2f} ({r_drift_pct:+.0%})")
 
+        # ── R INFLATION GUARD (2026-09-28) ────────────────────────────
+        # The stop stays where the signal put it, so an adverse fill makes the
+        # realised R LARGER. Position sizing then normalises the DOLLAR risk,
+        # so this is not an over-risk problem -- it is a trade-QUALITY problem:
+        # the take-profit is placed at tp_r * live_R, so an inflated R pushes
+        # the target further away while the stop stays the same distance in
+        # dollars. The trade needs a bigger move for the same reward, which
+        # lowers the probability of reaching it.
+        #
+        # Observed live: STELLAR-2 FRA40 2026-09-28. signal_R 21.50 -> live_R
+        # 41.42 (+93%). The existing drift guard passed it at "0.93R, within
+        # guard" because it measures drift against SIGNAL R and never looks at
+        # the inflation that drift caused. TP moved from ~54 pts away to 103.55
+        # pts away. It stopped out.
+        #
+        # The drift guard and this guard are complementary: drift guard bounds
+        # how far price moved; this bounds what that did to the trade geometry.
+        MAX_R_INFLATION = 1.50
+        if sig.get("risk_points", 0) > 0:
+            _infl = live_risk_points / sig["risk_points"]
+            if _infl > MAX_R_INFLATION:
+                logger.warning(
+                    f"{symbol}: R INFLATION GUARD — live_R={live_risk_points:.2f} is "
+                    f"{_infl:.2f}x signal_R={sig['risk_points']:.2f} "
+                    f"(max {MAX_R_INFLATION}x). TP would sit {_infl:.2f}x further "
+                    f"away for the same dollar risk. Trade REJECTED.")
+                self.edge_guard.record_missed_trade(
+                    symbol, f"r_inflation_{_infl:.2f}x", sig.get("entry_price", 0))
+                _infl_key = f"rinfl_{symbol}"
+                if not self._block_notify_sent.get(_infl_key):
+                    self.telegram.send_message(
+                        f"[{symbol}] Trade skipped — stop distance inflated "
+                        f"{_infl:.2f}x by adverse fill (max {MAX_R_INFLATION}x).")
+                    self._block_notify_sent[_infl_key] = datetime.now()
+                self._session_recap.setdefault(symbol, {}).update({
+                    'signal_found': True, 'signal_dir': sig.get('direction', ''),
+                    'reason': f'r_inflation ({_infl:.2f}x > {MAX_R_INFLATION}x)',
+                    'entry_price': sig.get('entry_price', 0),
+                })
+                return
+
         # ── LIVE R MINIMUM GUARD ──────────────────────────────────────
         # After drift, live_R may be far smaller than signal_R (entry moved
         # close to SL). Reject if live_R < per-symbol minimum so we don't
@@ -1892,6 +2051,58 @@ class LiveTrader:
             logger.warning(f"{symbol}: Position size = 0 lots, skipping")
             self.edge_guard.record_missed_trade(symbol, "zero_lot_size", sig.get('entry_price', 0))
             return
+
+        # ── MINIMUM-LOT RISK OVERSHOOT GUARD (2026-09-28) ─────────────
+        # Position sizing solves lots = risk$ / (R_points * point_value), but
+        # the broker enforces a minimum volume (0.01 here). When the stop is
+        # wide and the account small, the SMALLEST POSSIBLE position already
+        # risks more than intended, and sizing silently rounds UP to the
+        # minimum instead of failing.
+        #
+        # Observed live: STELLAR-2 US30 2026-09-25. Intended 0.1% = $6.00 on a
+        # 286.44 pt stop needs ~0.002 lots; the floor is 0.01, so the trade
+        # risked $28.64 = 0.48% -- nearly 5x the configured cap. The bot logged
+        # "(0.5%)" and took it anyway. A 0.1% validation week was not running
+        # at 0.1%.
+        #
+        # Backtests never see this: they assume continuous position sizing.
+        # This is therefore also a live/backtest parity defect, not only a risk
+        # one.
+        #
+        # NOTE: on a small account this WILL block wide-stop symbols at low
+        # risk settings. That is the correct outcome, not a malfunction -- the
+        # position genuinely cannot be sized to the requested risk. Raise the
+        # risk setting or drop the symbol; do not loosen the guard to make
+        # trades appear.
+        MAX_RISK_OVERSHOOT = 1.25
+        _intended = float(sizing.get("risk_amount", 0.0))
+        _per_lot = float(sizing.get("risk_per_lot", 0.0))
+        _actual = lots * _per_lot
+        if _intended > 0 and _per_lot > 0:
+            _over = _actual / _intended
+            if _over > MAX_RISK_OVERSHOOT:
+                logger.warning(
+                    f"{symbol}: MIN-LOT RISK OVERSHOOT — smallest tradable size "
+                    f"{lots} lots risks ${_actual:.2f} "
+                    f"({100.0 * _actual / balance:.2f}% of balance) vs intended "
+                    f"${_intended:.2f} ({risk_pct:.2f}%) = {_over:.2f}x "
+                    f"(max {MAX_RISK_OVERSHOOT}x). R={live_risk_points:.1f} pts. "
+                    f"Trade REJECTED.")
+                self.edge_guard.record_missed_trade(
+                    symbol, f"minlot_overshoot_{_over:.2f}x", sig.get("entry_price", 0))
+                _ov_key = f"minlot_{symbol}"
+                if not self._block_notify_sent.get(_ov_key):
+                    self.telegram.send_message(
+                        f"[{symbol}] Trade skipped — min lot {lots} risks "
+                        f"${_actual:.2f} ({_over:.2f}x the intended ${_intended:.2f}). "
+                        f"Stop too wide to size at {risk_pct:.2f}%.")
+                    self._block_notify_sent[_ov_key] = datetime.now()
+                self._session_recap.setdefault(symbol, {}).update({
+                    'signal_found': True, 'signal_dir': sig.get('direction', ''),
+                    'reason': f'minlot_overshoot ({_over:.2f}x)',
+                    'entry_price': sig.get('entry_price', 0),
+                })
+                return
 
         # ── DRIFT GUARD (v3.14.1) ──────────────────────────────────────
         # Reject trades where price has drifted > MAX_DRIFT_R from signal
@@ -2018,11 +2229,33 @@ class LiveTrader:
 
         t_order_start = time.perf_counter()
 
-        # STELLAR-2: Use limit order at signal entry price for zero-slippage fills.
-        # Other accounts use market orders (default behavior).
-        # Limit order fills at exact price or better; times out after 60s if not filled.
-        _use_limit = ACCOUNT_LABEL in ("STELLAR-2", "STELLAR-15K")
-        if _use_limit:
+        # STELLAR-2 / STELLAR-15K execution path (gated by USE_LIMIT_ORDERS).
+        # When USE_LIMIT_ORDERS is off, these accounts fall back to the plain
+        # market-order path below (identical to STELLAR-3).
+        _use_limit = USE_LIMIT_ORDERS and ACCOUNT_LABEL in ("STELLAR-2", "STELLAR-15K")
+        if _use_limit and USE_MARKETABLE_LIMIT:
+            # MARKETABLE = market order with a slippage cap. A "limit through the
+            # market" is an INVALID MT5 order (a BUY LIMIT must sit below market,
+            # a SELL LIMIT above it) and was rejected with retcode 10015. Place a
+            # TRADE_ACTION_DEAL market order instead and cap worst-case slippage
+            # via the `deviation` field = MARKETABLE_CAP_R * R, expressed in
+            # broker points. If price has moved beyond the cap the broker rejects
+            # (requote) rather than filling — exactly the intended slippage cap.
+            _si = mt5.symbol_info(symbol)
+            _point = (_si.point if _si and _si.point else 0.01)
+            _cap_pts = MARKETABLE_CAP_R * live_risk_points
+            _dev = max(1, int(round(_cap_pts / _point)))
+            logger.info(f"{symbol}: MARKETABLE MARKET ({ACCOUNT_LABEL}) — "
+                        f"cap={MARKETABLE_CAP_R}R ({_cap_pts:.2f}pts = {_dev} deviation pts)")
+            result = self.mt5.place_order(
+                symbol, order_type, lots,
+                sl=sig["stop_loss"], tp=sig["tp"],
+                comment=comment, deviation=_dev,
+            )
+        elif _use_limit:
+            # RESTING LIMIT at signal entry price (zero slippage but low fill
+            # rate — only fills on a pullback to the signal level).
+            # BUY: round UP to tick; SELL: round DOWN — fill-friendly.
             import math
             _si = mt5.symbol_info(symbol)
             if _si:
@@ -2030,38 +2263,18 @@ class LiveTrader:
                 _dg = _si.digits
             else:
                 _tick, _dg = 0.01, 2
-            _marketable = USE_MARKETABLE_LIMIT
-            if _marketable:
-                # MARKETABLE LIMIT: place at the current market plus a small cap
-                # so it fills immediately at market, but never worse than
-                # MARKETABLE_CAP_R * R of slippage. Fixes the resting limit's
-                # low fill rate (it only filled on pullbacks) while still
-                # capping bad-tick slippage. Caps scales with the trade's R.
-                _cb, _ca = self.mt5.get_current_price(symbol)
-                _ref = (_ca if order_type == "buy" else _cb) or expected_price
-                _cap_pts = MARKETABLE_CAP_R * live_risk_points
-                if order_type == "buy":
-                    limit_price = round(math.ceil((_ref + _cap_pts) / _tick) * _tick, _dg)
-                else:
-                    limit_price = round(math.floor((_ref - _cap_pts) / _tick) * _tick, _dg)
-                logger.info(f"{symbol}: MARKETABLE LIMIT ({ACCOUNT_LABEL}) — ref={_ref:.2f} "
-                            f"cap={MARKETABLE_CAP_R}R ({_cap_pts:.2f}pts) limit={limit_price}")
+            _lp_raw = sig["entry_price"]
+            if order_type == "buy":
+                limit_price = round(math.ceil(_lp_raw / _tick) * _tick, _dg)
             else:
-                # RESTING LIMIT at signal entry price (zero slippage but low
-                # fill rate — only fills on a pullback to the signal level).
-                # BUY: round UP to tick; SELL: round DOWN — fill-friendly.
-                _lp_raw = sig["entry_price"]
-                if order_type == "buy":
-                    limit_price = round(math.ceil(_lp_raw / _tick) * _tick, _dg)
-                else:
-                    limit_price = round(math.floor(_lp_raw / _tick) * _tick, _dg)
-                logger.info(f"{symbol}: LIMIT ORDER mode ({ACCOUNT_LABEL}) — signal={_lp_raw:.2f}, limit={limit_price} (tick-rounded)")
+                limit_price = round(math.floor(_lp_raw / _tick) * _tick, _dg)
+            logger.info(f"{symbol}: LIMIT ORDER mode ({ACCOUNT_LABEL}) — signal={_lp_raw:.2f}, limit={limit_price} (tick-rounded)")
             result = self.mt5.place_limit_order(
                 symbol, order_type, lots,
                 price=limit_price,
                 sl=sig["stop_loss"], tp=sig["tp"],
                 timeout_seconds=10, comment=comment,
-                marketable=_marketable,
+                marketable=False,
             )
             if not result["success"]:
                 _lerr = result.get("error", "")
@@ -2480,8 +2693,28 @@ class LiveTrader:
                     mfe_pts = round(info.get("max_favorable", 0) * pos_R, 2) if pos_R else 0
                     mae_pts = round(info.get("max_adverse", 0) * pos_R, 2) if pos_R else 0
                     pnl_pts = pnl / (info.get("volume", 1) * self._get_point_value(symbol)) if info.get("volume") else 0
+                    # ── Balance After: read the REAL broker balance ──────
+                    # Previously `self.state.current_balance + pnl`, a COMPUTED
+                    # value. When pnl was wrong (0.0 whenever deal history was
+                    # unavailable at close — the code explicitly handles that
+                    # case with a deferred re-query) the error was baked into
+                    # Balance After and carried forward into every later row.
+                    # That is why the P&L column and Balance After disagreed on
+                    # 42/43 trades and why per-trade R could not be recovered.
+                    # The broker's own balance cannot drift. Fall back to the
+                    # computed value only if the read fails, so a transient MT5
+                    # hiccup can never break the close path.
+                    _bal_after = None
+                    try:
+                        _acct_now = self.mt5.get_account_info()
+                        if _acct_now and _acct_now.get("balance"):
+                            _bal_after = float(_acct_now["balance"])
+                    except Exception as _e:
+                        logger.warning(f"{symbol}: balance read failed ({_e}); "
+                                       f"falling back to computed balance")
+                    if _bal_after is None:
+                        _bal_after = self.state.current_balance + pnl
                     # Compute DD% from initial balance
-                    _bal_after = self.state.current_balance + pnl
                     _dd_pct = round(((ACCOUNT_SIZE - _bal_after)
                                      / ACCOUNT_SIZE) * 100, 2) if ACCOUNT_SIZE else 0
                     # Exit spread + exit slippage (from current tick at close time)
@@ -2518,6 +2751,13 @@ class LiveTrader:
                         "drawdown": _dd_pct,
                         "spread_exit": round(_spread_exit, 4),
                         "exit_slippage": round(_exit_slip, 4),
+                        # Provenance for the P&L figure, so downstream analysis
+                        # can drop rows whose value was estimated rather than
+                        # read from the broker's deal history.
+                        "pnl_source": ("deal_history"
+                                       if details.get('pnl', 0) not in (0, 0.0)
+                                       else ("pending_requery"
+                                             if pnl == 0.0 else "estimated")),
                         "commission": details.get('commission', 0),
                         "swap": details.get('swap', 0),
                         "risk_tier": _risk_tier,
@@ -2617,8 +2857,8 @@ class LiveTrader:
                         force_min = close_min - 15
                     else:
                         # Fallback for trades opened before this fix: static mt5 hours
-                        mt5_close_h = config.get("mt5_close_hour", 23)
-                        mt5_close_m = config.get("mt5_close_minute", 0)
+                        mt5_close_h = _req(config, "mt5_close_hour")
+                        mt5_close_m = _req(config, "mt5_close_minute")
                         close_min = mt5_close_h * 60 + mt5_close_m
                         force_min = close_min - 15
 
@@ -2867,6 +3107,27 @@ class LiveTrader:
             for attempt in range(12):  # FIX (May 4): Increased from 6 to 12 attempts
                 deals = mt5.history_deals_get(start, now, position=ticket)
                 if deals:
+                    # ── position_id is the AUTHORITATIVE key ──────────────
+                    # history_deals_get(position=ticket) is not reliable on
+                    # this broker: it returns deals belonging to OTHER
+                    # positions (88 mismatches observed in live logs). The old
+                    # recovery filtered on SYMBOL ONLY, so for a US30 position
+                    # it happily adopted a DIFFERENT US30 position's deals --
+                    # producing an in-band but wrong exit price (e.g. exit
+                    # 46385.85 against entry 45506.52 = 879 pts, while the
+                    # summed deal PnL was only -$69.79). That is the source of
+                    # the phantom 254-860 pt "Exit Slip Pts" values.
+                    # Always narrow by position_id first; symbol is only a
+                    # secondary sanity check.
+                    _bypos = [d for d in deals
+                              if getattr(d, 'position_id', None) == ticket]
+                    if _bypos and len(_bypos) != len(deals):
+                        logger.info(
+                            f"Deal set for {ticket} contained {len(deals)} deals; "
+                            f"narrowed to {len(_bypos)} by position_id")
+                    if _bypos:
+                        deals = _bypos
+
                     # Sanity check: verify deals belong to the expected symbol
                     if expected_symbol and hasattr(deals[0], 'symbol'):
                         deal_symbol = deals[0].symbol
@@ -2875,8 +3136,11 @@ class LiveTrader:
                                 f"Deal symbol mismatch for position {ticket}: "
                                 f"expected {expected_symbol}, got {deal_symbol}. "
                                 f"Deals may belong to a different position.")
-                            # Filter deals to only include the expected symbol
-                            filtered = [d for d in deals if d.symbol == expected_symbol]
+                            # Filter on BOTH position_id and symbol. Symbol
+                            # alone is not sufficient -- see note above.
+                            filtered = [d for d in deals
+                                        if d.symbol == expected_symbol
+                                        and getattr(d, 'position_id', ticket) == ticket]
                             if filtered:
                                 deals = filtered
                                 logger.info(f"Filtered to {len(deals)} deals for {expected_symbol}")
@@ -2893,23 +3157,19 @@ class LiveTrader:
                                         logger.info(f"Alternative lookup found {len(deals)} deals "
                                                     f"for {expected_symbol} via group filter")
                                     else:
-                                        # Last resort: find the most recent DEAL_ENTRY_OUT for this symbol
-                                        exit_deals = [d for d in alt_deals if d.entry == 1]
-                                        if exit_deals:
-                                            # Pick the most recent exit within last 60s
-                                            recent = [d for d in exit_deals
-                                                      if (now.timestamp() - d.time) < 60]
-                                            if recent:
-                                                deals = recent[-1:]  # most recent
-                                                logger.info(f"Alternative lookup: using most recent "
-                                                            f"{expected_symbol} exit deal (within 60s)")
-                                            else:
-                                                logger.warning(f"No recent {expected_symbol} exit deals found")
-                                                result['symbol_mismatch'] = True
-                                                return result
-                                        else:
-                                            result['symbol_mismatch'] = True
-                                            return result
+                                        # REMOVED: the old last resort adopted
+                                        # "the most recent exit deal for this
+                                        # symbol within 60s" regardless of which
+                                        # POSITION it belonged to. That silently
+                                        # attributes another trade's exit price
+                                        # to this one. A wrong number is worse
+                                        # than a missing one, so flag and bail.
+                                        logger.warning(
+                                            f"Cannot attribute deals to position {ticket} "
+                                            f"({expected_symbol}) by position_id - refusing to "
+                                            f"guess an exit price")
+                                        result['symbol_mismatch'] = True
+                                        return result
                                 else:
                                     # NO deals match expected symbol — return mismatch flag
                                     logger.warning(f"No deals found for {expected_symbol} in position "

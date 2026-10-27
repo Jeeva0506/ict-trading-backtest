@@ -122,26 +122,30 @@ class TelegramCommandHandler:
             logger.error(f"Failed to save state: {e}")
     
     def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
-        """Send a message to Telegram"""
+        """Send a message to Telegram with retry logic"""
         if not self.enabled:
             return False
-        
-        try:
-            url = f"{self.base_url}/sendMessage"
-            payload = {
-                "chat_id": self.chat_id,
-                "text": message,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True
-            }
-            response = requests.post(url, json=payload, timeout=10)
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"Failed to send message: {e}")
-            return False
+
+        url = f"{self.base_url}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": message,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+
+        for attempt in range(3):
+            try:
+                response = requests.post(url, json=payload, timeout=10)
+                return response.status_code == 200
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(f"Failed to send message after 3 attempts: {e}")
+                time.sleep(1)
+        return False
     
     def get_updates(self, timeout: int = 30) -> list:
-        """Get updates from Telegram using long-polling"""
+        """Get updates from Telegram using long-polling with retry logic"""
         try:
             url = f"{self.base_url}/getUpdates"
             params = {
@@ -149,17 +153,32 @@ class TelegramCommandHandler:
                 "timeout": timeout,
                 "allowed_updates": ["message"]
             }
+
             response = requests.get(url, params=params, timeout=timeout + 10)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 if data.get('ok'):
+                    self._consecutive_failures = 0
                     return data.get('result', [])
+            # Non-200 (e.g. 409 Conflict when another bot polls the SAME token,
+            # or 429 rate limit) used to return [] with NO sleep, so _poll_loop
+            # spun at 100% CPU hammering Telegram. Back off instead.
+            self._consecutive_failures = getattr(self, '_consecutive_failures', 0) + 1
+            if self._consecutive_failures in (1, 3) or self._consecutive_failures % 50 == 0:
+                logger.warning(f"Telegram getUpdates HTTP {response.status_code} "
+                               f"(attempt {self._consecutive_failures}) - backing off. "
+                               f"409 = another bot is polling the same token.")
+            time.sleep(min(60, 5 * self._consecutive_failures))
             return []
         except requests.exceptions.Timeout:
             return []
         except Exception as e:
-            logger.error(f"Failed to get updates: {e}")
+            self._consecutive_failures = getattr(self, '_consecutive_failures', 0) + 1
+            if self._consecutive_failures <= 3 or self._consecutive_failures % 20 == 0:
+                logger.error(f"Failed to get updates (attempt {self._consecutive_failures}): {e}")
+            backoff = min(30, 5 * self._consecutive_failures)
+            time.sleep(backoff)
             return []
     
     def is_authorized(self, user_id: int, username: str = None) -> bool:

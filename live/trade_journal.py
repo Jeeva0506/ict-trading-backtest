@@ -177,6 +177,7 @@ class TradeJournal:
             "Commission",        # AO - broker commission ($)
             "Swap",              # AP - broker swap ($)
             "Risk Tier",         # AQ - TIER 1/2/3 at exit
+            "Final SL",          # AR - actual SL at exit (after trailing)
         ]
         ws_trades.append(headers)
         
@@ -364,17 +365,41 @@ class TradeJournal:
                 ws.cell(row=row_num, column=32, value=exit_data.get('be_hit', ''))        # AF
                 ws.cell(row=row_num, column=33, value=exit_data.get('balance_after', 0))  # AG
                 ws.cell(row=row_num, column=34, value=exit_data.get('drawdown', 0))       # AH
+                # AI: Notes — PRESERVE what add_trade() wrote. This used to be
+                # blanked on close, destroying the per-trade execution record
+                # (sigR / liveR / slip / spread / lat) that the open path had
+                # just captured. That data is the only reliable source for
+                # measuring live fill quality against backtest, because
+                # Balance-After deltas are unusable when positions overlap.
+                # A provenance tag for the P&L figure is appended so analysis
+                # can tell a deal-history value from a fallback estimate.
+                _prev_note = ws.cell(row=row_num, column=35).value or ''
+                _pnl_src = exit_data.get('pnl_source', '')
+                ws.cell(row=row_num, column=35,
+                        value=(f"{_prev_note} | pnl_src={_pnl_src}"
+                               if _pnl_src else _prev_note))
+                ws.cell(row=row_num, column=36, value=exit_data.get('spread_entry', ''))  # AJ
                 ws.cell(row=row_num, column=37, value=exit_data.get('spread_exit', ''))   # AK
                 ws.cell(row=row_num, column=38, value=exit_data.get('exit_slippage', '')) # AL
+                ws.cell(row=row_num, column=39, value='')                                 # AM: Session (reserved)
+                ws.cell(row=row_num, column=40, value='')                                 # AN: Weekday (reserved)
                 ws.cell(row=row_num, column=41, value=exit_data.get('commission', ''))    # AO
                 ws.cell(row=row_num, column=42, value=exit_data.get('swap', ''))          # AP
                 ws.cell(row=row_num, column=43, value=exit_data.get('risk_tier', ''))     # AQ
+                ws.cell(row=row_num, column=44, value=exit_data.get('final_sl', 0))       # AR: Final SL
                 
                 # Color code P&L
                 if pnl > 0:
                     ws.cell(row=row_num, column=24).fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                 elif pnl < 0:
                     ws.cell(row=row_num, column=24).fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                
+                # Log final SL for audit trail
+                final_sl = exit_data.get('final_sl', 0)
+                original_sl = ws.cell(row=row_num, column=10).value  # J: Stop Loss (original)
+                if final_sl and original_sl and abs(final_sl - original_sl) > 0.001:
+                    logger.info(f"Trade {trade_id} trailing SL: {original_sl:.2f} -> {final_sl:.2f} "
+                                f"(+{abs(final_sl - original_sl):.2f} pts, exit={exit_data.get('exit_price', 0):.2f})")
                 
                 break
         

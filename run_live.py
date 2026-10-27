@@ -24,6 +24,12 @@ from datetime import datetime
 _pre_parser = argparse.ArgumentParser(add_help=False)
 _pre_parser.add_argument('--account', type=str, default='',
                          help='Account profile name (loads .env.<profile>)')
+# --strategy selects which trader class run_live() builds. The default 'orb'
+# is the original LiveTrader, so every existing launch (STELLAR-3, STELLAR-15K)
+# behaves exactly as before unless the flag is passed explicitly.
+_pre_parser.add_argument('--strategy', type=str, default='orb',
+                         choices=['orb', 'orb15', 'smc'],
+                         help='orb (default, unchanged) | orb15 | smc')
 _pre_args, _ = _pre_parser.parse_known_args()
 if _pre_args.account:
     os.environ['ACCOUNT_PROFILE'] = _pre_args.account
@@ -237,8 +243,17 @@ def run_live():
     print(f"   Indices: {', '.join(PROFITABLE_INDICES.keys())}")
     print("\n   Press Ctrl+C to stop\n")
     
-    trader = LiveTrader()
-    
+    _strat = (getattr(_pre_args, 'strategy', 'orb') or 'orb')
+    if _strat == 'smc':
+        from live.smc_trader import SMCTrader
+        trader = SMCTrader()
+    elif _strat == 'orb15':
+        from live.orb15_trader import ORB15Trader
+        trader = ORB15Trader()
+    else:
+        trader = LiveTrader()          # unchanged default path
+    print(f"   Strategy: {_strat}")
+
     if trader.initialize():
         trader.run()
     else:
@@ -253,7 +268,10 @@ def main():
     parser.add_argument('--config', action='store_true', help='Show configuration')
     parser.add_argument('--account', type=str, default='',
                         help='Account profile name (loads .env.<profile>)')
-    
+    parser.add_argument('--strategy', type=str, default='orb',
+                        choices=['orb', 'orb15', 'smc'],
+                        help='Trader class: orb (default) | orb15 | smc')
+
     args = parser.parse_args()
     
     if args.status:

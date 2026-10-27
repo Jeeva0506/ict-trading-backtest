@@ -61,3 +61,18 @@ live/logs/position_state.json
 live/logs/heartbeat.txt
 live/logs/watchdog.lock
 live/logs/news_cache.json
+
+# All env files (secrets) — copy *.env.example and fill in your own
+.env*
+envzerodha
+!*.env.example
+!.env.example
+
+# Indian market runtime data
+indian_market/data/*.csv
+indian_market/**/logs/
+indian_market/**/state/
+indian_market/results/
+indian_market/reports/
+indian_market/live/reports/
+indian_market/orb_sweep/data/

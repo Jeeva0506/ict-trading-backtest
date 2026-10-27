@@ -1,5 +1,0 @@
-Variant_ID,Name,ORB_Minutes,Breakout_Margin,Disp_Mult,Body_Min,Close_Strength,Expected_Trade_Change
-VARIANT_A_AGGRESSIVE,AGGRESSIVE - More Frequent Entries,12,0.02,1.2,0.5,0.2,"More trades, potentially lower WR"
-VARIANT_B_BALANCED,BALANCED - Current/Optimized,15,0.05,1.3,0.6,0.25,Balanced trades and quality
-VARIANT_C_CONSERVATIVE,CONSERVATIVE - High-Quality Only,18,0.07,1.5,0.75,0.3,"Fewer trades, higher quality"
-VARIANT_D_EARLY_ENTRY,EARLY_ENTRY - Catch Moves Sooner,10,0.03,1.2,0.55,0.2,"Earlier detection, more chop"

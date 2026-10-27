@@ -95,24 +95,63 @@ if _account_profile == 'stellar15k':
     ATR_SL_ENABLED = False            # Disabled - reverting to fixed buffers
     EDGE_GUARD_ENABLED = False        # Disabled - let it trade freely
 elif _account_profile == 'stellar3':
-    # STELLAR-3: Conservative (1.0% → 0.5%)
+    # STELLAR-3: 2026-08-20 — tier 1 risk now steps down by trade-of-day:
+    #   trade 1 = 1.5%, trade 2 = 1.0%  (worst day 2.5%)
+    # With max_trades_per_day=2 a flat 1.5% would put two full-SL losses at
+    # exactly the 3.0% hard daily DD limit with zero slippage margin. Stepping
+    # the second trade down to 1.0% keeps 0.5% of headroom.
+    # BUFFER-DERIVED risk from 2026-10-01, WITH the tier-2 brake preserved.
+    #   risk% = buffer_safety*(balance-floor)/(assumed_mcl*balance)*100
+    # capped by: buffer_max_risk, the daily allowance, AND -- while DD >=
+    # tier2_threshold -- tier2_risk_percent. The brake matters here: at balance
+    # 5709.66 (DD 4.84%) the raw formula gave 0.72% against a tier-2 of 0.50%,
+    # i.e. a 44% risk INCREASE on the account with the least buffer remaining
+    # ($309.66). With buffer_respect_tier2 the brake wins in drawdown and the
+    # ladder only engages on recovery. assumed_mcl=6 is measured from 76 live
+    # ORB15 trades. Kept IDENTICAL in both config copies (audit finding 1.1).
     ADAPTIVE_RISK = {
         'enabled': True,
-        'default_risk_percent': 1.5,    # Tier 1: DD < 4% (conservative risk)
-        'tier2_risk_percent': 1,      # Tier 2: DD >= 4% (drawdown protection)
-        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
-        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+        'buffer_derived': True,
+        'buffer_respect_tier2': True,   # brake wins while in drawdown
+        'assumed_mcl': 6.0,
+        'buffer_safety': 0.80,
+        'buffer_min_risk': 0.25,
+        'buffer_max_risk': 2.00,
+        'default_risk_percent': 1.5,    # fallback if buffer_derived off
+        'trade_sequence_risk': [1.5, 1.0],
+        'tier2_risk_percent': 0.5,      # the brake, applied while DD >= 4%
+        'tier2_threshold': 4.0,
+        'recovery_threshold': 1.0,
     }
     ATR_SL_ENABLED = False            # Fixed buffers
     EDGE_GUARD_ENABLED = False        # Disabled — trading freely
 else:
-    # STELLAR-2: Standard (1.5% → 1.0%)
+    # STELLAR-2: BUFFER-DERIVED risk from 2026-10-01 (account holder's request:
+    # risk up as the account gains, down in drawdown).
+    #
+    #     risk% = buffer_safety * (balance - floor) / (assumed_mcl * balance) * 100
+    #
+    # floor = initial * (1 - max_drawdown_percent/100) and never trails, so
+    # profit permanently widens the buffer and the ladder is self-financing.
+    # Chosen over a fixed profit ladder because a flat 2% at +2% BREACHES the
+    # floor on a repeat of the observed losing streak:
+    #     balance 6120, MCL 6 at 2% -> 6*0.02*6120 = $734 -> $5,386 vs $5,400
+    # whereas the same 2% is safe at balance 6300. The formula distinguishes
+    # these automatically; a static tier cannot.
+    #
+    # assumed_mcl = 6 is MEASURED: 76 live ORB15 round trips on STELLAR-15K
+    # (WR 48.7%) contained a 6-trade losing streak.
     ADAPTIVE_RISK = {
         'enabled': True,
-        'default_risk_percent': 1.5,    # Tier 1: DD < 4% (standard risk)
-        'tier2_risk_percent': 1.0,      # Tier 2: DD >= 4% (drawdown protection)
-        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
-        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+        'buffer_derived': True,         # use the formula above
+        'assumed_mcl': 6.0,             # measured live, not assumed
+        'buffer_safety': 0.80,          # spend at most 80% of the buffer on an MCL run
+        'buffer_min_risk': 0.25,        # never size below this
+        'buffer_max_risk': 2.00,        # account holder's stated ceiling
+        'default_risk_percent': 1.0,    # fallback if buffer_derived is turned off
+        'tier2_risk_percent': 0.5,      # Tier 2: DD >= 4% (unused when buffer_derived)
+        'tier2_threshold': 4.0,
+        'recovery_threshold': 1.0,
     }
     ATR_SL_ENABLED = False            # Fixed buffers
     EDGE_GUARD_ENABLED = False        # Disabled — trading freely
@@ -155,6 +194,10 @@ MT5_PATH = os.getenv('MT5_PATH', '')           # path to terminal64.exe (empty =
 # MARKETABLE_CAP_R of the trade's R. Flip per account in the .env file.
 USE_MARKETABLE_LIMIT = os.getenv('USE_MARKETABLE_LIMIT', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 MARKETABLE_CAP_R = float(os.getenv('MARKETABLE_CAP_R', '0.05'))
+# Master switch for the limit-order path on STELLAR-2 / STELLAR-15K. When OFF,
+# these accounts fall back to plain market orders (same path STELLAR-3 uses).
+# Lets us disable limit execution per account from .env without code changes.
+USE_LIMIT_ORDERS = os.getenv('USE_LIMIT_ORDERS', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
 # Comma-separated list of symbols to EXCLUDE from this account
 # e.g. EXCLUDE_INDICES=US2000,FRA40
 _EXCLUDE_RAW = os.getenv('EXCLUDE_INDICES', '')

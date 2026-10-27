@@ -41,6 +41,9 @@ import logging
 _pre_parser = argparse.ArgumentParser(add_help=False)
 _pre_parser.add_argument('--account', type=str, default='',
                          help='Account profile name (loads .env.<profile>)')
+_pre_parser.add_argument('--strategy', type=str, default='',
+                         help='Passed through to run_live.py (orb|orb15|smc). '
+                              'Empty = run_live.py default, i.e. unchanged.')
 _pre_args, _ = _pre_parser.parse_known_args()
 if _pre_args.account:
     os.environ['ACCOUNT_PROFILE'] = _pre_args.account
@@ -211,6 +214,7 @@ class TradingWatchdog:
         self.script_path = Path(__file__).parent / 'run_live.py'
         # Build subprocess command — pass --account to run_live.py if set
         self._account_profile = _pre_args.account
+        self._strategy = getattr(_pre_args, 'strategy', '') or ''
         self.process = None
         self.start_time = None
         self.restart_count = 0
@@ -275,6 +279,8 @@ class TradingWatchdog:
             cmd = [str(self.python_path), str(self.script_path)]
             if self._account_profile:
                 cmd.extend(['--account', self._account_profile])
+            if self._strategy:
+                cmd.extend(['--strategy', self._strategy])
             
             self.process = subprocess.Popen(
                 cmd,
@@ -319,6 +325,17 @@ class TradingWatchdog:
         except Exception as e:
             logger.warning(f"Bot.lock adoption check failed: {e}")
         return False
+
+    @property
+    def current_bot_pid(self):
+        """PID of the bot we're monitoring, whether we started it or adopted it.
+
+        self.process is None for an adopted bot, so reading it directly makes a
+        healthy adopted bot log as 'Bot PID: None' and look like a crash.
+        """
+        if self._adopted_pid is not None:
+            return self._adopted_pid
+        return self.process.pid if self.process else None
 
     def is_bot_running(self) -> bool:
         """Check if the bot subprocess (or adopted bot process) is still alive."""
@@ -702,7 +719,8 @@ class TradingWatchdog:
                 if datetime.now().minute % 10 == 0 and datetime.now().second < 30:
                     uptime = datetime.now() - self.start_time if self.start_time else timedelta(0)
                     logger.info(
-                        f"Watchdog status - Bot PID: {self.process.pid if self.process else 'None'} | "
+                        f"Watchdog status - Bot PID: {self.current_bot_pid or 'None'}"
+                        f"{' (adopted)' if self._adopted_pid else ''} | "
                         f"Uptime: {uptime} | Restarts: {self.restart_count} | "
                         f"CPU: {resources['cpu_percent']}% | RAM: {resources['memory_percent']}%"
                     )

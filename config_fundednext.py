@@ -91,23 +91,54 @@ if _account_profile == 'stellar15k':
     }
 elif _account_profile == 'stellar3':
     EDGE_GUARD_ENABLED = False        # Disabled - let it trade freely
-    # STELLAR-3: Conservative (1.0% → 0.5%)
+    # STELLAR-3: 2026-08-20 — tier 1 risk now steps down by trade-of-day:
+    #   trade 1 = 1.5%, trade 2 = 1.0%  (worst day 2.5%)
+    # With max_trades_per_day=2 a flat 1.5% would put two full-SL losses at
+    # exactly the 3.0% hard daily DD limit with zero slippage margin. Stepping
+    # the second trade down to 1.0% keeps 0.5% of headroom.
+    # BUFFER-DERIVED risk from 2026-10-01, WITH the tier-2 brake preserved.
+    #   risk% = buffer_safety*(balance-floor)/(assumed_mcl*balance)*100
+    # capped by: buffer_max_risk, the daily allowance, AND -- while DD >=
+    # tier2_threshold -- tier2_risk_percent. The brake matters here: at balance
+    # 5709.66 (DD 4.84%) the raw formula gave 0.72% against a tier-2 of 0.50%,
+    # i.e. a 44% risk INCREASE on the account with the least buffer remaining
+    # ($309.66). With buffer_respect_tier2 the brake wins in drawdown and the
+    # ladder only engages on recovery. assumed_mcl=6 is measured from 76 live
+    # ORB15 trades. Kept IDENTICAL in both config copies (audit finding 1.1).
     ADAPTIVE_RISK = {
         'enabled': True,
-        'default_risk_percent': 1.5,    # Tier 1: DD < 4% (conservative risk)
-        'tier2_risk_percent': 1.0,      # Tier 2: DD >= 4% (drawdown protection)
-        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
-        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+        'buffer_derived': True,
+        'buffer_respect_tier2': True,   # brake wins while in drawdown
+        'assumed_mcl': 6.0,
+        'buffer_safety': 0.80,
+        'buffer_min_risk': 0.25,
+        'buffer_max_risk': 2.00,
+        'default_risk_percent': 1.5,    # fallback if buffer_derived off
+        'trade_sequence_risk': [1.5, 1.0],
+        'tier2_risk_percent': 0.5,      # the brake, applied while DD >= 4%
+        'tier2_threshold': 4.0,
+        'recovery_threshold': 1.0,
     }
 else:
     EDGE_GUARD_ENABLED = False        # Disabled - let it trade freely
-    # STELLAR-2: Standard (1.5% → 1.0%)
+    # STELLAR-2: BUFFER-DERIVED risk from 2026-10-01. Kept IDENTICAL to
+    # live/config_fundednext.py -- these two copies diverging is finding 1.1 in
+    # agents/ENGINEERING_AUDIT_2026-09-25.md.
+    #     risk% = buffer_safety * (balance - floor) / (assumed_mcl * balance) * 100
+    # floor never trails, so profit permanently widens the buffer. A flat 2% at
+    # +2% would BREACH: 6*0.02*6120 = $734 -> $5,386 vs a $5,400 floor.
+    # assumed_mcl = 6 is MEASURED from 76 live ORB15 trades.
     ADAPTIVE_RISK = {
         'enabled': True,
-        'default_risk_percent': 1.5,    # Tier 1: DD < 4% (standard risk)
-        'tier2_risk_percent': 1.0,      # Tier 2: DD >= 4% (drawdown protection)
-        'tier2_threshold': 4.0,         # Switch to tier2 at 4% DD
-        'recovery_threshold': 1.0,      # Restore to tier1 when DD < 1%
+        'buffer_derived': True,
+        'assumed_mcl': 6.0,
+        'buffer_safety': 0.80,
+        'buffer_min_risk': 0.25,
+        'buffer_max_risk': 2.00,
+        'default_risk_percent': 1.0,
+        'tier2_risk_percent': 0.5,
+        'tier2_threshold': 4.0,
+        'recovery_threshold': 1.0,
     }
 
 # ============================================================================
@@ -146,6 +177,9 @@ MT5_PATH = os.getenv('MT5_PATH', '')           # path to terminal64.exe (empty =
 # MARKETABLE_CAP_R of R. Enable per account via .env.
 USE_MARKETABLE_LIMIT = os.getenv('USE_MARKETABLE_LIMIT', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 MARKETABLE_CAP_R = float(os.getenv('MARKETABLE_CAP_R', '0.05'))
+# Master switch for the limit-order path on STELLAR-2 / STELLAR-15K. When OFF,
+# these accounts fall back to plain market orders (same path STELLAR-3 uses).
+USE_LIMIT_ORDERS = os.getenv('USE_LIMIT_ORDERS', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
 
 # Comma-separated list of symbols to EXCLUDE from this account
 # e.g. EXCLUDE_INDICES=US2000,FRA40

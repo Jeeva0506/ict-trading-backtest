@@ -316,6 +316,45 @@ TRADING_COSTS = {
                            "AUS200": 0.0, "EUSTX50": 0.0, "NTH25": 0.0, "SWI20": 0.0, "UK100": 0.0, "US2000": 0.0},
 }
 
+# ---------------------------------------------------------------------------
+# MEASURED SPREADS — applied 2026-09-28. Behaviour-changing, documented.
+# ---------------------------------------------------------------------------
+# The spread_points above were assumptions of unrecorded origin. They were
+# measured directly from the live broker instead: STELLAR-2, login 14270333,
+# FundedNext-Server 2, 40 consecutive samples per symbol. Every symbol returned
+# min == max across all 40 samples, i.e. FundedNext quotes FIXED spreads on
+# these indices — they do not widen tick to tick.
+#
+#   symbol   assumed   MEASURED   provenance
+#   NDX100     1.00      1.60     21:23 broker, US session OPEN  -> verified
+#   SPX500     0.50      0.58     21:23 broker, US session OPEN  -> verified
+#   US30       2.00      1.98     21:23 broker, US session OPEN  -> verified
+#   GER30      1.00      2.00     EU session CLOSED              -> provisional
+#   FRA40      0.50      2.00     EU session CLOSED              -> provisional
+#
+# The assumptions were optimistic on every symbol. NDX100 was understated 1.6x,
+# which moves its cost/R from ~0.0275 to ~0.044 — material, because the master
+# variable in this project is cost relative to R.
+#
+# GER30/FRA40 were sampled twice on different days (2026-09-24 21:23 and
+# 2026-09-28 21:38) and returned 2.04/2.00 and 2.00/2.00. Because the quotes
+# are fixed rather than dynamic, these are PROBABLY the in-session values too,
+# but that is inference, not measurement. Confirm during 10:00-18:30 broker
+# with scratchpad/measure_spreads.py (read-only) and update the labels here.
+#
+# A third source disagrees and is NOT used: the trade journal's "Spread Exit"
+# column (NDX100 2.45, SPX500 0.73, US30 5.77, GER30 5.64, FRA40 1.92). Its
+# companion "Spread Entry" column is 0.0 on every row, so that instrumentation
+# is not trustworthy.
+MEASURED_SPREAD_POINTS = {
+    "NDX100": 1.60,   # verified in-session
+    "SPX500": 0.58,   # verified in-session
+    "US30":   1.98,   # verified in-session
+    "GER30":  2.00,   # PROVISIONAL — measured out of session
+    "FRA40":  2.00,   # PROVISIONAL — measured out of session
+}
+TRADING_COSTS["spread_points"].update(MEASURED_SPREAD_POINTS)
+
 # FundedNext account rules (Stellar challenge, funded phase)
 FUNDEDNEXT_RULES = {
     "daily_dd_pct": 3.0,      # max daily drawdown (aligned with live 3%)
@@ -524,17 +563,18 @@ def run_portfolio_backtest(debug_strategy: bool = False):
     ALL_SYMBOLS = ["GER30", "US30", "NDX100", "SPX500"]
 
     # Clean M1 data + native H1 for EMA (if available)
+    _DP = os.getenv("DATA_PREFIX", "")   # e.g. "10YR_" to use *_10YR_M1_CLEAN.csv
     CLEAN_M1_FILES = {
-        "GER30": "GER30_M1_CLEAN.csv",
-        "US30": "US30_M1_CLEAN.csv",
-        "NDX100": "NDX100_M1_CLEAN.csv",
-        "SPX500": "SPX500_M1_CLEAN.csv",
+        "GER30": f"GER30_{_DP}M1_CLEAN.csv",
+        "US30": f"US30_{_DP}M1_CLEAN.csv",
+        "NDX100": f"NDX100_{_DP}M1_CLEAN.csv",
+        "SPX500": f"SPX500_{_DP}M1_CLEAN.csv",
     }
     H1_EMA_FILES = {
-        "GER30": "GER30_H1_EMA.csv",
-        "US30": "US30_H1_EMA.csv",
-        "NDX100": "NDX100_H1_EMA.csv",
-        "SPX500": "SPX500_H1_EMA.csv",
+        "GER30": f"GER30_{_DP}H1_EMA.csv",
+        "US30": f"US30_{_DP}H1_EMA.csv",
+        "NDX100": f"NDX100_{_DP}H1_EMA.csv",
+        "SPX500": f"SPX500_{_DP}H1_EMA.csv",
     }
 
     # Check if clean files exist, fall back to 1-year if not

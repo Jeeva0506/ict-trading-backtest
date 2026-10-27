@@ -171,15 +171,40 @@ def send_telegram_alert(message: str) -> bool:
             "parse_mode": "HTML"
         }
         
-        response = requests.post(url, json=payload, timeout=10)
-        
-        if response.status_code == 200:
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                if logger:
+                    logger.debug(f"Telegram alert sent: {message[:50]}...")
+                return True
+            elif response.status_code == 400:
+                if logger:
+                    logger.error(f"Telegram 400 Bad Request: {response.text}")
+                # Try again with plain text
+                payload["parse_mode"] = "Text"
+                retry = requests.post(url, json=payload, timeout=10)
+                if retry.status_code == 200:
+                    return True
+                if logger:
+                    logger.warning(f"Retry with plain text failed: {retry.text}")
+                return False
+            else:
+                if logger:
+                    logger.warning(f"Telegram API error {response.status_code}: {response.text}")
+                return False
+                
+        except requests.exceptions.Timeout:
             if logger:
-                logger.debug(f"Telegram alert sent: {message[:50]}...")
-            return True
-        else:
+                logger.error("Telegram request timed out after 10s")
+            return False
+        except requests.exceptions.ConnectionError as ce:
             if logger:
-                logger.warning(f"Telegram API error: {response.status_code}")
+                logger.error(f"Telegram connection error: {ce}")
+            return False
+        except requests.exceptions.RequestException as re:
+            if logger:
+                logger.error(f"Telegram request exception: {re}")
             return False
             
     except Exception as e:
@@ -391,9 +416,21 @@ def verify_sl_after_entry(ticket: int, expected_sl: float, expected_tp: float, s
             
             # Check if position exists
             if not positions or len(positions) == 0:
-                if logger:
-                    logger.warning(f"Position {ticket} not found - may have already closed")
-                return False
+                if attempt < SL_VERIFICATION_ATTEMPTS:
+                    if logger:
+                        logger.warning(
+                            f"Position {ticket} not found on attempt "
+                            f"{attempt}/{SL_VERIFICATION_ATTEMPTS} — "
+                            f"MT5 may not have registered it yet, retrying in 2s...")
+                    time.sleep(2)
+                    continue
+                else:
+                    if logger:
+                        logger.warning(
+                            f"Position {ticket} not found after "
+                            f"{SL_VERIFICATION_ATTEMPTS} attempts — "
+                            f"assumed closed by broker")
+                    return False
             
             position = positions[0]
             

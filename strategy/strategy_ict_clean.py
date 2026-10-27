@@ -28,6 +28,56 @@ class TradeSignalICT:
     breakout_time: Any = None      # breakout candle timestamp (for stale calc)
 
 
+# ── Fill-model knobs (audit Sep 2026) ───────────────────────────────────
+# Defaults reproduce the original model byte-for-byte; the live path is
+# unaffected unless a backtest explicitly overrides them.
+#   ENTRY_DELAY_BARS     0 = fill at open of the bar right after confirmation
+#                        1 = fill one bar later (models a slower actor)
+#   SIM_INCLUDE_ENTRY_BAR False = skip the entry bar when simulating exits
+#                        (an SL hit inside the entry bar is missed)
+FORCE_DIRECT_ENTRY = False   # True = skip the retest scan entirely.
+# The retest scan looks up to 20 FUTURE bars and, if it finds nothing, enters
+# back at breakout+1 -- a bar already in the past. That fallback is LOOKAHEAD.
+# It also means the backtest takes retest entries the LIVE bot cannot: live
+# calls generate_signals on closed bars, so at breakout+1 there is no future
+# to scan and it always falls through to the direct entry. Setting this True
+# reproduces what the live bot actually does.
+ENTRY_DELAY_BARS = 0
+SIM_INCLUDE_ENTRY_BAR = False
+
+# RETEST STOP PLACEMENT (flag added 2026-10-06, default = CURRENT live behaviour)
+#   True  = stop at the SIGNAL (breakout) candle's extreme   <- live since 2026-09-21
+#   False = stop at the RETEST candle's extreme              <- behaviour during Phase 1
+#
+# The 2026-09-21 edit changed this UNCONDITIONALLY and was never tested. It is
+# not covered by the three knobs above, despite the header claiming the live
+# path is unaffected by default. Making it a flag so the two rules can be
+# compared on identical signals; the default preserves today's behaviour
+# exactly, so adding this flag changes nothing on its own.
+#
+# It matters because the breakout candle's extreme normally sits FURTHER from
+# entry than a shallow retest's, so True WIDENS R -- the same price move then
+# scores a smaller R-multiple and the 2.5R target sits further away in price.
+# MEASURED 2026-10-06 (x65_sl_rule_ab.py), identical signals, only this flag
+# differing. Negative in BOTH periods for the signal-candle rule, so REVERTED
+# to the retest-candle stop that Phase 1 ran:
+#
+#                       TRAIN <2024              TEST >=2024
+#   RETEST (False)  +0.0222R t0.95 PF1.05    +0.2098R t3.90 PF1.52   <- better
+#   SIGNAL (True)   +0.0063R t0.29 PF1.01    +0.1970R t3.71 PF1.47
+#   delta            -0.0159                  -0.0128
+#
+# The retest stop is tighter (median R 6.9 vs 7.5 / 10.3 vs 11.5), which is the
+# mechanism: a tighter denominator turns the same price move into a larger
+# R-multiple. It also takes 9% fewer trades (2781 vs 3064) because the tighter
+# stop trips min_sl_points on marginal setups.
+#
+# CAVEAT: both arms carried the retest lookahead, so the LEVELS above are
+# inflated (~+0.25R, x62). Only the DELTA is trustworthy, and it is what this
+# flag is set from.
+USE_SIGNAL_CANDLE_SL = False
+
+
 class StrategyICTClean:
     """
     === ORB Clean Breakout — Single Target (Universal Index) ===
@@ -455,7 +505,7 @@ class StrategyICTClean:
             next_idx = None
             retest_limit = min(df_idx + 1 + 20, len(w))
 
-            for look in range(df_idx + 1, retest_limit):
+            for look in ([] if FORCE_DIRECT_ENTRY else range(df_idx + 1, retest_limit)):
                 look_bar = w.iloc[look]
                 look_ts = w.index[look]
                 if look_ts >= cutoff_close:
@@ -469,7 +519,9 @@ class StrategyICTClean:
                             if look + 1 < len(w):
                                 next_idx = look + 1
                                 entry_price = float(w.iloc[next_idx]["open"])
-                                sl = float(look_bar["low"]) - self.sl_buffer
+                                sl = ((l if USE_SIGNAL_CANDLE_SL
+                                       else float(look_bar["low"]))
+                                      - self.sl_buffer)
                                 retest_found = True
                             break
                 else:
@@ -480,7 +532,9 @@ class StrategyICTClean:
                             if look + 1 < len(w):
                                 next_idx = look + 1
                                 entry_price = float(w.iloc[next_idx]["open"])
-                                sl = float(look_bar["high"]) + self.sl_buffer
+                                sl = ((h if USE_SIGNAL_CANDLE_SL
+                                       else float(look_bar["high"]))
+                                      + self.sl_buffer)
                                 retest_found = True
                             break
 
@@ -497,6 +551,24 @@ class StrategyICTClean:
 
             if next_idx is None or entry_price is None or sl is None:
                 i += 1; continue
+
+            # Determine signal price (trigger candle close) for drift calculation.
+            # Captured BEFORE any fill-model shift so its meaning is unchanged.
+            if retest_found:
+                signal_close = float(w.iloc[next_idx - 1]["close"])  # retest candle close
+            else:
+                signal_close = c  # breakout candle close
+
+            # ── FILL-MODEL KNOBS (audit Sep 2026) ────────────────────────
+            # Defaults reproduce the original model exactly, so the live path
+            # is unaffected. ENTRY_DELAY_BARS pushes the fill later to test how
+            # much the edge depends on getting the immediate next-bar open.
+            if ENTRY_DELAY_BARS:
+                _shift = next_idx + ENTRY_DELAY_BARS
+                if _shift >= len(w) or w.index[_shift] >= cutoff_close:
+                    i += 1; continue
+                next_idx = _shift
+                entry_price = float(w.iloc[next_idx]["open"])
 
             # Re-calculate R from actual entry price
             if direction == "bullish":
@@ -519,15 +591,13 @@ class StrategyICTClean:
                 disp_ratio=round(candle_range / avg_r, 2),
             )
 
-            # Determine signal price (trigger candle close) for drift calculation
-            if retest_found:
-                signal_close = float(w.iloc[next_idx - 1]["close"])  # retest candle close
-            else:
-                signal_close = c  # breakout candle close
-
             trade = self._simulate_trade(
                 df=w,
-                start_idx=next_idx + 1,  # simulate from bar AFTER entry
+                # SIM_INCLUDE_ENTRY_BAR=False (default) simulates from the bar
+                # AFTER entry, so an SL hit inside the entry bar is invisible.
+                # True includes the entry bar — strictly more pessimistic and
+                # more realistic for a market fill at that bar's open.
+                start_idx=next_idx + (0 if SIM_INCLUDE_ENTRY_BAR else 1),
                 direction=direction,
                 entry=entry_price,
                 sl_init=sl,

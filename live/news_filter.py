@@ -29,6 +29,9 @@ class EconomicCalendar:
         'forex_factory': "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     }
 
+    # Min seconds between self-heal fetch attempts while in the failed state
+    HEAL_RETRY_SECONDS = 60
+
     # Symbol to currency mapping — all traded indices
     SYMBOL_CURRENCIES = {
         'SPX500': ['USD'],
@@ -54,6 +57,8 @@ class EconomicCalendar:
         self.cache = []
         self.last_fetch = None
         self.fetch_failed = False
+        # Throttle for the failed-state self-heal retry (see is_news_time).
+        self._last_heal_attempt = None
         # FIX B8: Use namespaced cache dir to avoid write race between accounts
         if cache_dir:
             self.cache_file = Path(cache_dir) / 'news_cache.json'
@@ -140,13 +145,40 @@ class EconomicCalendar:
             session.close()
         return None
 
+    def _cache_age_hours(self) -> float:
+        """Age of the in-memory cache in hours.
+
+        Returns 0.0 when we have never fetched. That deliberately preserves the
+        original fail-safe semantics (`if self.fetch_failed and self.last_fetch`):
+        a cold start that has never reached the network does NOT block trading.
+        """
+        if not self.last_fetch:
+            return 0.0
+        return (datetime.now() - self.last_fetch).total_seconds() / 3600
+
     def fetch_news(self) -> List[dict]:
-        """Fetch news from all sources"""
+        """Fetch news from all sources.
+
+        Retries while in the failed state are throttled here rather than at the
+        call site, so EVERY re-fetch path is covered. Previously only the >2h
+        self-heal branch in is_news_time() was throttled; below that threshold
+        this method is reached ~every 5s per symbol via get_upcoming_high_impact,
+        and once the cache passed cache_minutes each of those calls issued a live
+        request (with 3 urllib3 retries behind it). During a DNS outage that both
+        floods the endpoint and stalls the calling thread on every tick.
+        """
         # Check cache
         if self.last_fetch:
             cache_age = (datetime.now() - self.last_fetch).total_seconds() / 60
             if cache_age < self.cache_minutes:
                 return self.cache
+
+        # Throttle: while failed, attempt at most once per HEAL_RETRY_SECONDS.
+        if self.fetch_failed and self._last_heal_attempt is not None:
+            since_attempt = (datetime.now() - self._last_heal_attempt).total_seconds()
+            if since_attempt < self.HEAL_RETRY_SECONDS:
+                return self.cache
+        self._last_heal_attempt = datetime.now()
 
         # Fetch fresh data
         events = self._fetch_forex_factory()
@@ -156,25 +188,42 @@ class EconomicCalendar:
             logger.warning("News calendar fetch failed — will block trading as safety measure")
             return self.cache  # return stale cache, fetch_failed flag handles blocking
 
+        if not events:
+            # HTTP 200 with an empty payload. Treat as a FAILURE, not a healthy
+            # "quiet week": ff_calendar_thisweek.json is never legitimately empty,
+            # so this is a truncated/edge-cached response. Clearing fetch_failed
+            # here (the old behaviour) marked the calendar healthy while leaving
+            # last_fetch ancient — the fail-safe could then never trip and the bot
+            # traded on an indefinitely stale cache.
+            self.fetch_failed = True
+            logger.warning("News calendar returned an empty payload — treating as fetch failure")
+            return self.cache
+
+        was_failed = self.fetch_failed
         self.fetch_failed = False
-        if events:
-            self.cache = events
-            self.last_fetch = datetime.now()
+        self.cache = events
+        self.last_fetch = datetime.now()
 
-            # Save to file (atomic: write to temp, then rename)
-            try:
-                self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self.cache_file.with_suffix('.tmp')
-                with open(tmp, 'w') as f:
-                    json.dump({
-                        'fetch_time': str(self.last_fetch),
-                        'events': events
-                    }, f)
-                tmp.replace(self.cache_file)
-            except Exception:
-                pass
+        # Save to file (atomic: write to temp, then rename)
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.cache_file.with_suffix('.tmp')
+            with open(tmp, 'w') as f:
+                json.dump({
+                    'fetch_time': str(self.last_fetch),
+                    'events': events
+                }, f)
+            tmp.replace(self.cache_file)
+        except Exception:
+            pass
 
-            logger.info(f"Fetched {len(events)} economic events")
+        logger.info(f"Fetched {len(events)} economic events")
+        if was_failed:
+            # Logged here so it marks EVERY recovery, not just the >2h heal path.
+            logger.warning(
+                f"NEWS FETCH RECOVERED — calendar available again "
+                f"({len(events)} events); trading unblocked"
+            )
 
         return self.cache
 
@@ -239,17 +288,28 @@ class EconomicCalendar:
         Returns:
             (is_news: bool, event_details: dict or None)
         """
-        # Fail-safe: if fetch failed and cache is old, assume news is active
-        if self.fetch_failed and self.last_fetch:
-            cache_age_hours = (datetime.now() - self.last_fetch).total_seconds() / 3600
-            if cache_age_hours > 2.0:
-                return True, {
-                    'title': 'CALENDAR UNAVAILABLE (fetch failed, stale cache)',
-                    'time': 'unknown',
-                    'currency': 'ALL',
-                    'minutes_away': 0,
-                    'impact': 'high',
-                }
+        # Self-heal (2026-07-14): if we're in the failed+stale state, attempt a
+        # fresh fetch BEFORE honoring the fail-safe. Without this the branch
+        # returned early and never re-fetched, so a single connectivity blip
+        # latched fetch_failed=True permanently — the bot stayed blocked even
+        # after the network recovered.
+        #
+        # The retry throttle (HEAL_RETRY_SECONDS) now lives inside fetch_news()
+        # so it covers every re-fetch path, not just this one; calling it on each
+        # ~5s tick is therefore cheap. fetch_news() also emits NEWS FETCH
+        # RECOVERED when the flag clears.
+        if self.fetch_failed and self._cache_age_hours() > 2.0:
+            self.fetch_news()
+
+        # Fail-safe: if fetch STILL failed and cache is old, assume news is active
+        if self.fetch_failed and self._cache_age_hours() > 2.0:
+            return True, {
+                'title': 'CALENDAR UNAVAILABLE (fetch failed, stale cache)',
+                'time': 'unknown',
+                'currency': 'ALL',
+                'minutes_away': 0,
+                'impact': 'high',
+            }
 
         upcoming = self.get_upcoming_high_impact(symbol)
 
