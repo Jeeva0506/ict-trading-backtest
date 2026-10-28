@@ -85,7 +85,7 @@ Every parameter is in `indian_market/orb_sweep/config.py` (`TradingConfig`). The
 
 Straddle settings are in `LiveStraddleConfig` in `orb_sweep/trader.py`.
 
-> ⚠️ **Known issue: expiry day.** `is_nifty_expiry()` in `orb_sweep/expiry_straddle.py` treats **Thursday** as Nifty weekly expiry. NSE has changed the expiry weekday since this was written (it is Tuesday as of late 2025). Check the current NSE expiry day and update that function, or the straddle will run on the wrong day.
+> **Expiry day.** `is_nifty_expiry()` in `orb_sweep/expiry_straddle.py` treats **Tuesday** as Nifty weekly expiry from Sep 2025 (Thursday before that, so backtests on older data stay correct). Expiries moved by an NSE holiday (e.g. to Monday) are **not** detected. Stop the straddle on those weeks yourself. If NSE changes the expiry day again, update `NIFTY_TUESDAY_EXPIRY_START` and the weekday in that function.
 
 ## 5. Run
 

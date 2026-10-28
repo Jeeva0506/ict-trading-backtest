@@ -30,7 +30,7 @@
 | `Insufficient permission` / no historical data | The Kite Connect subscription isn't active, or the historical data add-on isn't enabled |
 | `ORB computation failed -- insufficient bars` | You started after 9:30 on a holiday, or the data feed is behind. It retries. |
 | `Regime filter FAILED` | Not an error. The day's range was too quiet, so no sweep trades today. |
-| Straddle on the wrong weekday | Update `is_nifty_expiry()` to the current NSE expiry day (doc 5 known issue) |
+| Straddle on the wrong day | The expiry moved because of a holiday, or NSE changed the weekday. See `is_nifty_expiry()` (doc 5, step 4) |
 | Wrong quantity | Update `lot_size` in `orb_sweep/config.py` to the current NSE lot size |
 | Telegram silent | `indian_market/.env.indian` is missing or has the wrong token or chat ID |
 

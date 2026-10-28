@@ -1,7 +1,7 @@
 """
 Expiry-Day Straddle — 0DTE overlay for ORB Sweep.
 
-On NIFTY weekly expiry days (Thursdays), option premiums decay rapidly
+On NIFTY weekly expiry days (Tuesdays; Thursdays before Sep 2025), option premiums decay rapidly
 (theta crush) but gamma spikes — meaning any real move creates outsized
 returns. This module layers a straddle on top of the sweep system:
 
@@ -98,8 +98,14 @@ class ExpiryStraddleConfig:
     slippage_pct: float = 0.01
 
 
+NIFTY_TUESDAY_EXPIRY_START = date(2025, 9, 1)
+
+
 def is_nifty_expiry(d: date) -> bool:
-    """Thursday = NIFTY weekly expiry (post Oct 2019)."""
+    """NIFTY weekly expiry: Tuesday from Sep 2025, Thursday Oct 2019 - Aug 2025,
+    last Thursday of the month before that. Holiday-shifted expiries not handled."""
+    if d >= NIFTY_TUESDAY_EXPIRY_START:
+        return d.weekday() == 1
     if d.weekday() != 3:
         return False
     from datetime import date as dt
