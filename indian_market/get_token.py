@@ -2,7 +2,7 @@
 Run: python get_token.py <request_token>
 
 Get the request_token from the redirect URL after logging in at:
-https://kite.zerodha.com/connect/login?api_key=xh9ib9qtnmk45pi3&v=3
+https://kite.zerodha.com/connect/login?api_key=<YOUR_API_KEY>&v=3
 
 The redirect URL looks like:
 https://127.0.0.1/?request_token=XXXXXXXXXX&action=login&status=success
